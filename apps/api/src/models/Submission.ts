@@ -1,0 +1,270 @@
+import { type Document, model, Schema, type Types } from "mongoose";
+
+export type SubmissionStage = "idea" | "mvp" | "early-revenue" | "scaling";
+
+export type SubmissionStatus =
+	| "draft"
+	| "submitted"
+	| "under_review"
+	| "approved"
+	| "rejected"
+	| "suspended"
+	| "matched"
+	| "closed";
+
+export interface ISubmissionDocument {
+	name: string;
+	url: string;
+	type:
+		| "pitch_deck"
+		| "financial_model"
+		| "product_demo"
+		| "customer_testimonials"
+		| "tin_certificate"
+		| "business_license"
+		| "moa_aoa"
+		| "other";
+	cloudinaryId?: string;
+	size?: number;
+	uploadedAt: Date;
+}
+
+export interface ISubmission extends Document {
+	entrepreneurId: Types.ObjectId;
+	title: string;
+	summary: string;
+	sector: string;
+	stage: SubmissionStage;
+	targetAmount?: number;
+	currency: string;
+	problem: {
+		statement: string;
+		targetMarket: string;
+		marketSize: string;
+	};
+	solution: {
+		description: string;
+		uniqueValue: string;
+		competitiveAdvantage: string;
+	};
+	businessModel: {
+		revenueStreams: string;
+		pricingStrategy: string;
+		customerAcquisition: string;
+	};
+	financials: {
+		currentRevenue: string;
+		projectedRevenue: string;
+		burnRate: string;
+		runway: string;
+	};
+	documents: ISubmissionDocument[];
+	aiScore?: number;
+	aiAnalysis?: Record<string, unknown>;
+	aiSummary?: {
+		executiveSummary: string;
+		keyStrengths: string[];
+		keyRisks: string[];
+		investmentReadiness: string;
+		marketOpportunity: string;
+		generatedAt: string;
+		model: string;
+	};
+	voiceSummaryUrl?: string;
+	pitchVideoUrl?: string;
+	videoStatus?: "pending" | "approved" | "flagged" | "rejected";
+	videoFlagReason?: string;
+	summaryStatus?: "pending" | "generating" | "completed" | "failed";
+	summaryError?: string;
+	currentStep: number;
+	status: SubmissionStatus;
+	isAiOverride?: boolean;
+	aiOverrideReason?: string;
+	reviewNotes?: string;
+	submittedAt?: Date;
+	closedAt?: Date;
+	createdAt: Date;
+	updatedAt: Date;
+}
+
+const documentSchema = new Schema<ISubmissionDocument>({
+	name: { type: String, required: true },
+	url: { type: String, required: true },
+	type: {
+		type: String,
+		enum: [
+			"pitch_deck",
+			"financial_model",
+			"product_demo",
+			"customer_testimonials",
+			"tin_certificate",
+			"business_license",
+			"moa_aoa",
+			"other",
+		],
+		default: "other",
+	},
+	cloudinaryId: { type: String },
+	size: { type: Number },
+	uploadedAt: { type: Date, default: Date.now },
+});
+
+const SubmissionSchema = new Schema<ISubmission>(
+	{
+		entrepreneurId: {
+			type: Schema.Types.ObjectId,
+			ref: "User",
+			required: true,
+			index: true,
+		},
+		title: {
+			type: String,
+			required: true,
+			trim: true,
+		},
+		summary: {
+			type: String,
+			required: false,
+			default: "",
+			maxlength: 3000,
+		},
+		sector: {
+			type: String,
+			enum: [
+				"technology",
+				"healthcare",
+				"fintech",
+				"education",
+				"agriculture",
+				"energy",
+				"real_estate",
+				"manufacturing",
+				"retail",
+				"other",
+			],
+			default: "other",
+		},
+		stage: {
+			type: String,
+			enum: [
+				"idea",
+				"mvp",
+				"early-revenue",
+				"scaling",
+			] satisfies SubmissionStage[],
+			required: true,
+			default: "idea",
+		},
+		targetAmount: {
+			type: Number,
+			min: 0,
+			default: null,
+		},
+		problem: {
+			statement: { type: String, default: "" },
+			targetMarket: { type: String, default: "" },
+			marketSize: { type: String, default: "" },
+		},
+		solution: {
+			description: { type: String, default: "" },
+			uniqueValue: { type: String, default: "" },
+			competitiveAdvantage: { type: String, default: "" },
+		},
+		businessModel: {
+			revenueStreams: { type: String, default: "" },
+			pricingStrategy: { type: String, default: "" },
+			customerAcquisition: { type: String, default: "" },
+		},
+		financials: {
+			currentRevenue: { type: String, default: "" },
+			projectedRevenue: { type: String, default: "" },
+			burnRate: { type: String, default: "" },
+			runway: { type: String, default: "" },
+		},
+		documents: [documentSchema],
+		aiScore: { type: Number, min: 0, max: 100 },
+		aiAnalysis: { type: Schema.Types.Mixed },
+		aiSummary: {
+			executiveSummary: { type: String, default: null },
+			keyStrengths: [{ type: String }],
+			keyRisks: [{ type: String }],
+			investmentReadiness: { type: String, default: null },
+			marketOpportunity: { type: String, default: null },
+			generatedAt: { type: String, default: null },
+			model: { type: String, default: null },
+		},
+		voiceSummaryUrl: { type: String, default: null },
+		pitchVideoUrl: {
+			type: String,
+			default: null,
+			validate: {
+				validator: (v: string | null) => {
+					if (!v) return true;
+					return /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)[\w-]+/.test(
+						v,
+					);
+				},
+				message: "Must be a valid YouTube URL",
+			},
+		},
+		videoStatus: {
+			type: String,
+			enum: ["pending", "approved", "flagged", "rejected"],
+			default: null,
+		},
+		videoFlagReason: { type: String, default: null },
+		summaryStatus: {
+			type: String,
+			enum: ["pending", "generating", "completed", "failed"],
+			default: null,
+		},
+		summaryError: { type: String, default: null },
+		currentStep: { type: Number, default: 1, min: 1, max: 6 },
+		currency: {
+			type: String,
+			default: "USD",
+			uppercase: true,
+			trim: true,
+		},
+		status: {
+			type: String,
+			enum: [
+				"draft",
+				"submitted",
+				"under_review",
+				"approved",
+				"rejected",
+				"suspended",
+				"matched",
+				"closed",
+			] satisfies SubmissionStatus[],
+			default: "draft",
+		},
+		isAiOverride: {
+			type: Boolean,
+			default: false,
+		},
+		aiOverrideReason: {
+			type: String,
+			default: null,
+		},
+		reviewNotes: {
+			type: String,
+			default: null,
+		},
+		submittedAt: {
+			type: Date,
+			default: null,
+		},
+		closedAt: {
+			type: Date,
+			default: null,
+		},
+	},
+	{ timestamps: true },
+);
+
+SubmissionSchema.index({ status: 1, sector: 1 });
+SubmissionSchema.index({ entrepreneurId: 1, status: 1 });
+
+export const Submission = model<ISubmission>("Submission", SubmissionSchema);
