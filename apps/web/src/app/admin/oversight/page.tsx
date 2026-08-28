@@ -1,0 +1,1697 @@
+"use client";
+
+import {
+	AlertCircle,
+	CheckCircle2,
+	Copy,
+	Crown,
+	DollarSign,
+	ExternalLink,
+	FileText,
+	Link2,
+	Loader2,
+	Mail,
+	Plus,
+	Rocket,
+	Send,
+	ShieldAlert,
+	ShieldCheck,
+	ShieldX,
+	Trash2,
+	UserCheck,
+	Users,
+	XCircle,
+} from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import DashboardLayout from "@/components/DashboardLayout";
+import ProtectedRoute from "@/components/ProtectedRoute";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { ADMIN_NAV } from "@/constants/navigation";
+import { useAuth } from "@/context/AuthContext";
+import { useLanguage } from "@/i18n/LanguageContext";
+import {
+	showErrorToast,
+	showInfoToast,
+	showSuccessToast,
+	showWarningToast,
+} from "@/lib/toast-messages";
+
+interface UserRecord {
+	_id: string;
+	fullName: string;
+	email: string;
+	role: string;
+	adminLevel?: "super_admin" | "admin" | null;
+	status: string;
+	photoURL?: string;
+	createdAt: string;
+}
+
+interface SubmissionRecord {
+	_id: string;
+	title: string;
+	sector: string;
+	status: string;
+	targetAmount: number;
+	entrepreneurId?: { fullName?: string; email?: string };
+	updatedAt: string;
+}
+
+interface Stats {
+	total: number;
+	[key: string]: number;
+}
+
+function roleBadge(role: string) {
+	switch (role) {
+		case "admin":
+			return "destructive" as const;
+		case "investor":
+			return "default" as const;
+		default:
+			return "secondary" as const;
+	}
+}
+
+function statusBadge(status: string) {
+	switch (status) {
+		case "verified":
+			return "default" as const;
+		case "pending":
+			return "secondary" as const;
+		case "suspended":
+			return "destructive" as const;
+		default:
+			return "outline" as const;
+	}
+}
+
+// Document preview card with inline image
+function DocLink({
+	url,
+	label,
+	missing,
+}: {
+	url?: string;
+	label: string;
+	missing?: string;
+}) {
+	if (!url) {
+		return (
+			<div className="flex items-center gap-3 rounded-xl border-2 border-dashed border-border/40 bg-muted/10 p-4">
+				<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted/50">
+					<XCircle className="h-5 w-5 text-muted-foreground/40" />
+				</div>
+				<div>
+					<p className="text-sm font-medium text-muted-foreground/60">
+						{label}
+					</p>
+					<p className="text-xs text-muted-foreground/40">
+						{missing || "Not uploaded"}
+					</p>
+				</div>
+			</div>
+		);
+	}
+
+	const isImage =
+		url.match(/\.(jpg|jpeg|png|webp|gif)/i) || url.includes("/image/upload/");
+
+	return (
+		<div className="rounded-xl border border-border/50 overflow-hidden bg-card">
+			{/* Label bar */}
+			<div className="flex items-center justify-between px-4 py-2.5 bg-muted/30 border-b border-border/30">
+				<div className="flex items-center gap-2">
+					<FileText className="h-4 w-4 text-primary shrink-0" />
+					<p className="text-sm font-semibold">{label}</p>
+				</div>
+				<a
+					href={url}
+					target="_blank"
+					rel="noopener noreferrer"
+					className="text-xs text-primary hover:underline flex items-center gap-1 shrink-0"
+				>
+					Open in new tab <ExternalLink className="h-3 w-3" />
+				</a>
+			</div>
+			{/* Inline preview */}
+			{isImage ? (
+				<div className="bg-[repeating-conic-gradient(hsl(var(--muted))_0%_25%,transparent_0%_50%)] bg-[length:16px_16px] p-3 flex items-center justify-center">
+					<img
+						src={url}
+						alt={label}
+						className="max-h-[320px] w-auto rounded-lg object-contain shadow-sm border border-border/20"
+					/>
+				</div>
+			) : (
+				<div className="p-6 flex flex-col items-center justify-center gap-2 text-muted-foreground">
+					<FileText className="h-10 w-10 text-muted-foreground/30" />
+					<p className="text-sm">PDF Document</p>
+					<a
+						href={url}
+						target="_blank"
+						rel="noopener noreferrer"
+						className="text-xs text-primary hover:underline flex items-center gap-1 mt-1"
+					>
+						Open to view <ExternalLink className="h-3 w-3" />
+					</a>
+				</div>
+			)}
+		</div>
+	);
+}
+
+export default function AdminOversight() {
+	const { user, userProfile } = useAuth();
+	const { t } = useLanguage();
+	const router = useRouter();
+	const isSuperAdmin = userProfile?.adminLevel === "super_admin";
+	const [users, setUsers] = useState<UserRecord[]>([]);
+	const [submissions, setSubmissions] = useState<SubmissionRecord[]>([]);
+	const [userStats, setUserStats] = useState<Stats>({ total: 0 });
+	const [subStats, setSubStats] = useState<Stats>({ total: 0 });
+	const [loading, setLoading] = useState(true);
+	const [roleFilter, setRoleFilter] = useState("all");
+	const [statusFilter, setStatusFilter] = useState("all");
+	const [actionUser, setActionUser] = useState<UserRecord | null>(null);
+	const [newStatus, setNewStatus] = useState("");
+	const [rejectionReason, setRejectionReason] = useState("");
+	const [actionUserProfile, setActionUserProfile] = useState<any>(null);
+	const [loadingProfile, setLoadingProfile] = useState(false);
+	const [pendingUsers, setPendingUsers] = useState<UserRecord[]>([]);
+
+	// Admin management (super admin only)
+	const [adminList, setAdminList] = useState<any[]>([]);
+	const [showInviteDialog, setShowInviteDialog] = useState(false);
+	const [inviteLink, setInviteLink] = useState("");
+	const [inviting, setInviting] = useState(false);
+
+	const [userPage, setUserPage] = useState(1);
+	const [submissionPage, setSubmissionPage] = useState(1);
+	const ITEMS_PER_PAGE = 10;
+	const [adminToRemove, setAdminToRemove] = useState<{
+		id: string;
+		name: string;
+	} | null>(null);
+
+	// Add admin by email (super admin only)
+	const [addByEmail, setAddByEmail] = useState("");
+	const [addByEmailLoading, setAddByEmailLoading] = useState(false);
+
+	// Submissions Review
+	const [selectedSubmission, setSelectedSubmission] =
+		useState<SubmissionRecord | null>(null);
+	const [submissionDocs, setSubmissionDocs] = useState<any[]>([]);
+	const [loadingDocs, setLoadingDocs] = useState(false);
+
+	const api = (
+		process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"
+	).replace(/\/+$/, "");
+
+	const fetchData = useCallback(async () => {
+		if (!user) return;
+		setLoading(true);
+		try {
+			const token = await user.getIdToken();
+			const headers = { Authorization: `Bearer ${token}` };
+
+			const [usersRes, subsRes, pendingRes] = await Promise.all([
+				fetch(`${api}/auth/admin/users?role=${roleFilter}`, { headers }),
+				fetch(`${api}/submissions/admin/all?status=${statusFilter}`, {
+					headers,
+				}),
+				fetch(`${api}/auth/admin/users?status=pending`, { headers }),
+			]);
+
+			const usersData = await usersRes.json();
+			const subsData = await subsRes.json();
+			const pendingData = await pendingRes.json();
+
+			if (usersData.status === "success") {
+				setUsers(usersData.users);
+				setUserStats(usersData.stats);
+			}
+			if (subsData.status === "success") {
+				setSubmissions(subsData.submissions);
+				setSubStats(subsData.stats);
+			}
+			if (pendingData.status === "success") {
+				setPendingUsers(pendingData.users);
+			}
+		} catch (err) {
+			console.error("Admin fetch error:", err);
+		} finally {
+			setLoading(false);
+		}
+	}, [user, roleFilter, statusFilter, api]);
+
+	const fetchAdmins = useCallback(async () => {
+		if (!user || !isSuperAdmin) return;
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/auth/admin/admins`, {
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			const data = await res.json();
+			if (data.status === "success") setAdminList(data.admins);
+		} catch (err) {
+			console.error("Fetch admins error:", err);
+		}
+	}, [user, isSuperAdmin, api]);
+
+	useEffect(() => {
+		fetchData();
+		fetchAdmins();
+	}, [fetchData, fetchAdmins]);
+
+	const fetchUserProfile = async (userId: string) => {
+		if (!user) return;
+		setLoadingProfile(true);
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/admin/users/${userId}/profile`, {
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				setActionUserProfile(data.profile);
+			} else {
+				setActionUserProfile(null);
+			}
+		} catch (err) {
+			console.error("Profile fetch error:", err);
+			setActionUserProfile(null);
+		} finally {
+			setLoadingProfile(false);
+		}
+	};
+
+	const handleStatusUpdate = async (
+		overrideStatus?: string,
+		overrideReason?: string,
+	) => {
+		if (!user || !actionUser) return;
+		const statusToSet = overrideStatus || newStatus;
+		if (!statusToSet) return;
+
+		try {
+			const token = await user.getIdToken();
+			await fetch(`${api}/auth/admin/users/${actionUser._id}/status`, {
+				method: "PATCH",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					status: statusToSet,
+					reason:
+						statusToSet === "unverified"
+							? overrideReason || rejectionReason
+							: undefined,
+				}),
+			});
+			setActionUser(null);
+			setActionUserProfile(null);
+			setNewStatus("");
+			setRejectionReason("");
+			fetchData();
+		} catch (err) {
+			console.error("Status update error:", err);
+		}
+	};
+
+	const pendingCount = pendingUsers.length;
+
+	const fetchSubmissionDocs = async (sub: SubmissionRecord) => {
+		if (!user) return;
+		setSelectedSubmission(sub);
+		setLoadingDocs(true);
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/documents?submissionId=${sub._id}`, {
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				setSubmissionDocs(data.documents);
+			} else {
+				setSubmissionDocs([]);
+			}
+		} catch (err) {
+			console.error("Failed to load generic docs", err);
+			setSubmissionDocs([]);
+		} finally {
+			setLoadingDocs(false);
+		}
+	};
+
+	const handleOverrideFlag = async (docId: string) => {
+		if (!user) return;
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/documents/${docId}/override`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				showSuccessToast("AI determination overridden successfully!");
+				if (selectedSubmission) {
+					fetchSubmissionDocs(selectedSubmission);
+				}
+				fetchData(); // refresh overview stats if relevant
+			} else {
+				showErrorToast(data.message || "Failed to override document");
+			}
+		} catch (_err) {
+			showErrorToast("An error occurred during Admin override");
+		}
+	};
+
+	const handlePitchStatusUpdate = async (status: string) => {
+		if (!user || !selectedSubmission) return;
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(
+				`${api}/submissions/${selectedSubmission._id}/status`,
+				{
+					method: "PATCH",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ status }),
+				},
+			);
+			const data = await res.json();
+			if (data.status === "success") {
+				showSuccessToast(`Pitch successfully marked as ${status}!`);
+				setSelectedSubmission(null);
+				fetchData();
+			} else {
+				showErrorToast(data.message || "Failed to update pitch status");
+			}
+		} catch (_err) {
+			showErrorToast("An error occurred updating the pitch status");
+		}
+	};
+
+	const handleInviteAdmin = async () => {
+		if (!user) return;
+		setInviting(true);
+		setInviteLink("");
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/auth/admin/admins/invite`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({}),
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				setInviteLink(data.inviteLink);
+				showSuccessToast("Invite link generated!");
+			} else {
+				showErrorToast(data.message);
+			}
+		} catch (_err) {
+			showErrorToast("Failed to generate invite");
+		} finally {
+			setInviting(false);
+		}
+	};
+
+	const handleAddAdminByEmail = async () => {
+		if (!user || !addByEmail.trim()) return;
+		setAddByEmailLoading(true);
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/auth/admin/admins/add-by-email`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ email: addByEmail.trim() }),
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				showSuccessToast(data.message);
+				setAddByEmail("");
+				setShowInviteDialog(false);
+				fetchAdmins();
+				fetchData();
+			} else {
+				showErrorToast(data.message);
+			}
+		} catch (_err) {
+			showErrorToast("Failed to add admin");
+		} finally {
+			setAddByEmailLoading(false);
+		}
+	};
+
+	const handleRemoveAdmin = async () => {
+		if (!user || !adminToRemove) return;
+		try {
+			const token = await user.getIdToken();
+			const res = await fetch(`${api}/auth/admin/admins/${adminToRemove.id}`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			const data = await res.json();
+			if (data.status === "success") {
+				showSuccessToast(data.message);
+				fetchAdmins();
+				fetchData();
+			} else {
+				showErrorToast(data.message);
+			}
+		} catch (_err) {
+			showErrorToast("Failed to remove admin");
+		} finally {
+			setAdminToRemove(null);
+		}
+	};
+
+	const paginatedUsers = users.slice(
+		(userPage - 1) * ITEMS_PER_PAGE,
+		userPage * ITEMS_PER_PAGE,
+	);
+	const totalUserPages = Math.ceil(users.length / ITEMS_PER_PAGE);
+
+	const paginatedSubmissions = submissions.slice(
+		(submissionPage - 1) * ITEMS_PER_PAGE,
+		submissionPage * ITEMS_PER_PAGE,
+	);
+	const totalSubmissionPages = Math.ceil(submissions.length / ITEMS_PER_PAGE);
+
+	return (
+		<ProtectedRoute allowedRoles={["admin"]}>
+			<DashboardLayout navItems={ADMIN_NAV} title="SEPMS Admin">
+				{/* Greeting Card */}
+				<div className="admin-greeting-card bg-card mb-8 p-6 sm:p-8 admin-content-fade">
+					<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+						<div>
+							<h1 className="text-2xl font-bold tracking-tight sm:text-3xl admin-header-gradient">
+								{t.admin.adminOverview}
+							</h1>
+							<p className="mt-1.5 text-muted-foreground text-sm sm:text-base">
+								{t.admin.monitorPlatform}
+							</p>
+						</div>
+						<div className="flex items-center gap-2 shrink-0">
+							<div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+							<span className="text-xs font-medium text-muted-foreground">
+								{t.admin.systemOnline}
+							</span>
+						</div>
+					</div>
+				</div>
+
+				{/* Stats */}
+				<div className="admin-stat-grid grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 mb-8">
+					{[
+						{
+							label: t.admin.totalUsers,
+							value: userStats.total,
+							icon: <Users className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-blue",
+							change: null,
+						},
+						{
+							label: t.admin.entrepreneurs,
+							value: userStats.entrepreneurs || 0,
+							icon: <Rocket className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-violet",
+							change: null,
+						},
+						{
+							label: t.admin.investors,
+							value: userStats.investors || 0,
+							icon: <DollarSign className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-emerald",
+							change: null,
+						},
+						{
+							label: t.admin.pendingKYC,
+							value: pendingCount,
+							icon: <UserCheck className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-amber",
+							change: pendingCount > 0 ? "action" : null,
+						},
+						{
+							label: t.pitch.submitted,
+							value: subStats.submitted || 0,
+							icon: <Send className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-cyan",
+							change: null,
+						},
+						{
+							label: t.pitch.approved,
+							value: subStats.approved || 0,
+							icon: <CheckCircle2 className="h-4.5 w-4.5 text-white" />,
+							gradient: "admin-icon-teal",
+							change: null,
+						},
+					].map((stat) => (
+						<div
+							key={stat.label}
+							className="admin-stat-card bg-card"
+							style={{ "--card-accent": undefined } as React.CSSProperties}
+						>
+							<div className="p-4 sm:p-5">
+								<div className="flex items-center gap-3">
+									<div
+										className={`admin-icon-glow ${stat.gradient} rounded-xl p-2.5 flex items-center justify-center shadow-sm`}
+									>
+										{stat.icon}
+									</div>
+									<div className="min-w-0 flex-1">
+										<p className="text-[11px] uppercase tracking-wider font-semibold text-muted-foreground/70 truncate">
+											{stat.label}
+										</p>
+										<div className="flex items-baseline gap-2">
+											<p className="text-2xl font-bold tracking-tight">
+												{stat.value}
+											</p>
+											{stat.change === "action" && (
+												<span className="text-[10px] font-semibold text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded-full">
+													{t.admin.needsReview}
+												</span>
+											)}
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					))}
+				</div>
+
+				<Tabs defaultValue="users">
+					<TabsList className="mb-6">
+						<TabsTrigger value="users">{t.nav.users}</TabsTrigger>
+						<TabsTrigger value="submissions">{t.nav.submissions}</TabsTrigger>
+						<TabsTrigger value="kyc-queue" className="gap-1.5">
+							{t.admin.kycQueue}
+							{pendingCount > 0 && (
+								<Badge
+									variant="destructive"
+									className="h-5 w-5 p-0 flex items-center justify-center text-[10px] rounded-full ml-1"
+								>
+									{pendingCount}
+								</Badge>
+							)}
+						</TabsTrigger>
+						{isSuperAdmin && (
+							<TabsTrigger value="admins" className="gap-1.5">
+								<Crown className="h-3.5 w-3.5" />
+								{t.admin.manageAdmins}
+							</TabsTrigger>
+						)}
+					</TabsList>
+
+					{/* ─── KYC Queue Tab ─── */}
+					<TabsContent value="kyc-queue">
+						<Card>
+							<CardHeader className="pb-3">
+								<CardTitle className="text-base flex items-center gap-2">
+									<ShieldCheck className="h-4 w-4 text-primary" />
+									{t.admin.pendingKYCReviews}
+								</CardTitle>
+							</CardHeader>
+							<Table>
+								<TableHeader>
+									<TableRow>
+										<TableHead>{t.admin.name}</TableHead>
+										<TableHead>{t.admin.email}</TableHead>
+										<TableHead>{t.admin.role}</TableHead>
+										<TableHead>{t.admin.joined}</TableHead>
+										<TableHead className="text-right">
+											{t.admin.actions}
+										</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{loading ? (
+										<TableRow>
+											<TableCell
+												colSpan={5}
+												className="text-center py-8 text-muted-foreground"
+											>
+												{t.common.loading}
+											</TableCell>
+										</TableRow>
+									) : pendingUsers.length === 0 ? (
+										<TableRow>
+											<TableCell
+												colSpan={5}
+												className="text-center py-12 text-muted-foreground"
+											>
+												<div className="flex flex-col items-center gap-2">
+													<CheckCircle2 className="h-8 w-8 text-green-500/50" />
+													<p className="font-medium">{t.admin.allCaughtUp}</p>
+													<p className="text-xs">{t.admin.noPendingKYC}</p>
+												</div>
+											</TableCell>
+										</TableRow>
+									) : (
+										pendingUsers.map((u) => (
+											<TableRow key={u._id}>
+												<TableCell className="font-medium">
+													{u.fullName}
+												</TableCell>
+												<TableCell className="text-muted-foreground text-sm">
+													{u.email}
+												</TableCell>
+												<TableCell>
+													<Badge
+														variant={roleBadge(u.role)}
+														className="text-xs capitalize"
+													>
+														{u.role}
+													</Badge>
+												</TableCell>
+												<TableCell className="text-sm text-muted-foreground">
+													{new Date(u.createdAt).toLocaleDateString()}
+												</TableCell>
+												<TableCell className="text-right">
+													<Button
+														size="sm"
+														onClick={() => {
+															setActionUser(u);
+															setNewStatus(u.status);
+															fetchUserProfile(u._id);
+														}}
+													>
+														{t.admin.reviewKYC}
+													</Button>
+												</TableCell>
+											</TableRow>
+										))
+									)}
+								</TableBody>
+							</Table>
+						</Card>
+					</TabsContent>
+
+					{/* ─── Users Tab ─── */}
+					<TabsContent value="users">
+						<div className="flex items-center justify-between gap-3 mb-4">
+							<div className="flex gap-3">
+								<Select
+									value={roleFilter}
+									onValueChange={(v) => {
+										setRoleFilter(v);
+										setUserPage(1);
+									}}
+								>
+									<SelectTrigger className="w-40">
+										<SelectValue placeholder={t.adminUsers.filterRole} />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="all">{t.adminUsers.allRoles}</SelectItem>
+										<SelectItem value="entrepreneur">{t.adminUsers.roleEntrepreneur}</SelectItem>
+										<SelectItem value="investor">{t.adminUsers.roleInvestor}</SelectItem>
+										<SelectItem value="admin">{t.adminUsers.roleAdmin}</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
+							<p className="text-sm text-muted-foreground">
+								{users.length} {t.adminUsers.usersFound}
+							</p>
+						</div>
+
+						<Card>
+							<Table>
+								<TableHeader>
+									<TableRow>
+										<TableHead>{t.admin.name}</TableHead>
+										<TableHead>{t.admin.email}</TableHead>
+										<TableHead>{t.admin.role}</TableHead>
+										<TableHead>{t.admin.status}</TableHead>
+										<TableHead>{t.admin.joined}</TableHead>
+										<TableHead className="text-right">
+											{t.admin.actions}
+										</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{loading ? (
+										<TableRow>
+											<TableCell
+												colSpan={6}
+												className="text-center py-8 text-muted-foreground"
+											>
+												{t.common.loading}
+											</TableCell>
+										</TableRow>
+									) : users.length === 0 ? (
+										<TableRow>
+											<TableCell
+												colSpan={6}
+												className="text-center py-8 text-muted-foreground"
+											>
+												{t.admin.noUsersFound}
+											</TableCell>
+										</TableRow>
+									) : (
+										paginatedUsers.map((u) => (
+											<TableRow key={u._id}>
+												<TableCell>
+													<div className="flex items-center gap-3">
+														<Avatar className="h-8 w-8 border shrink-0">
+															{u.photoURL && (
+																<AvatarImage
+																	src={u.photoURL}
+																	alt={u.fullName}
+																	className="object-cover"
+																/>
+															)}
+															<AvatarFallback className="bg-primary/10 text-primary text-xs font-bold">
+																{(u.fullName || "U")
+																	.split(" ")
+																	.map((n: string) => n[0])
+																	.join("")
+																	.toUpperCase()
+																	.slice(0, 2)}
+															</AvatarFallback>
+														</Avatar>
+														<span className="font-medium">{u.fullName}</span>
+													</div>
+												</TableCell>
+												<TableCell className="text-muted-foreground text-sm">
+													{u.email}
+												</TableCell>
+												<TableCell>
+													<Badge
+														variant={roleBadge(u.role)}
+														className="text-xs capitalize gap-1"
+													>
+														{u.adminLevel === "super_admin" && (
+															<Crown className="h-3 w-3 text-amber-500" />
+														)}
+														{u.adminLevel === "super_admin"
+															? "Super Admin"
+															: u.role}
+													</Badge>
+												</TableCell>
+												<TableCell>
+													<Badge
+														variant={statusBadge(u.status)}
+														className="text-xs capitalize"
+													>
+														{u.status}
+													</Badge>
+												</TableCell>
+												<TableCell className="text-sm text-muted-foreground">
+													{new Date(u.createdAt).toLocaleDateString()}
+												</TableCell>
+												<TableCell className="text-right">
+													{u.role === "admin" && !isSuperAdmin ? (
+														<span className="text-xs text-muted-foreground">
+															Protected
+														</span>
+													) : (
+														<Button
+															size="sm"
+															variant="outline"
+															onClick={() => {
+																setActionUser(u);
+																setNewStatus(u.status);
+																fetchUserProfile(u._id);
+															}}
+														>
+															{t.admin.manage}
+														</Button>
+													)}
+												</TableCell>
+											</TableRow>
+										))
+									)}
+								</TableBody>
+							</Table>
+							{/* Pagination */}
+							{totalUserPages > 1 && (
+								<div className="flex items-center justify-between p-4 border-t border-border/50">
+									<p className="text-sm text-muted-foreground">
+										{t.adminUsers.showing} {(userPage - 1) * ITEMS_PER_PAGE + 1}–
+										{Math.min(userPage * ITEMS_PER_PAGE, users.length)} {t.adminUsers.ofInfo}{" "}
+										{users.length}
+									</p>
+									<div className="flex items-center gap-1">
+										<Button
+											variant="outline"
+											size="sm"
+											onClick={() => setUserPage((p) => Math.max(1, p - 1))}
+											disabled={userPage === 1}
+											className="h-8 px-3"
+										>
+											{t.adminUsers.previous}
+										</Button>
+										{Array.from(
+											{ length: totalUserPages },
+											(_, i) => i + 1,
+										).map((pg) => (
+											<Button
+												key={pg}
+												variant={pg === userPage ? "default" : "outline"}
+												size="sm"
+												onClick={() => setUserPage(pg)}
+												className="h-8 w-8 p-0"
+											>
+												{pg}
+											</Button>
+										))}
+										<Button
+											variant="outline"
+											size="sm"
+											onClick={() =>
+												setUserPage((p) => Math.min(totalUserPages, p + 1))
+											}
+											disabled={userPage === totalUserPages}
+											className="h-8 px-3"
+										>
+											{t.common.next}
+										</Button>
+									</div>
+								</div>
+							)}
+						</Card>
+					</TabsContent>
+
+					{/* ─── Submissions Tab ─── */}
+					<TabsContent value="submissions">
+						<div className="flex gap-3 mb-4">
+							<Select
+								value={statusFilter}
+								onValueChange={(v) => {
+									setStatusFilter(v);
+									setSubmissionPage(1);
+								}}
+							>
+								<SelectTrigger className="w-44">
+									<SelectValue placeholder={t.adminUsers.filterStatus} />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="all">{t.adminUsers.allStatuses}</SelectItem>
+									<SelectItem value="draft">{t.pitch.draft}</SelectItem>
+									<SelectItem value="submitted">{t.pitch.submitted}</SelectItem>
+									<SelectItem value="under_review">{t.pitch.underReview}</SelectItem>
+									<SelectItem value="approved">{t.pitch.approved}</SelectItem>
+									<SelectItem value="rejected">{t.pitch.rejected}</SelectItem>
+									<SelectItem value="suspended">{t.adminUsers.statusSuspended}</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+
+						<Card>
+							<Table>
+								<TableHeader>
+									<TableRow>
+										<TableHead>{t.pitch.title}</TableHead>
+										<TableHead>{t.admin.entrepreneurs}</TableHead>
+										<TableHead>{t.pitch.sector}</TableHead>
+										<TableHead>{t.pitch.targetAmount}</TableHead>
+										<TableHead>{t.admin.status}</TableHead>
+										<TableHead>Updated</TableHead>
+										<TableHead className="text-right">{t.admin.actions}</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{loading ? (
+										<TableRow>
+											<TableCell
+												colSpan={6}
+												className="text-center py-8 text-muted-foreground"
+											>
+												{t.common.loading}
+											</TableCell>
+										</TableRow>
+									) : submissions.length === 0 ? (
+										<TableRow>
+											<TableCell
+												colSpan={7}
+												className="text-center py-8 text-muted-foreground"
+											>
+												{t.common.noResults}
+											</TableCell>
+										</TableRow>
+									) : (
+										paginatedSubmissions.map((s) => (
+											<TableRow key={s._id}>
+												<TableCell className="font-medium max-w-[200px] truncate">
+													{s.title}
+												</TableCell>
+												<TableCell className="text-sm text-muted-foreground">
+													{(
+														s.entrepreneurId as {
+															fullName?: string;
+														}
+													)?.fullName || "—"}
+												</TableCell>
+												<TableCell className="text-sm capitalize">
+													{s.sector?.replace("_", " ")}
+												</TableCell>
+												<TableCell className="text-sm">
+													{s.targetAmount
+														? `${s.targetAmount.toLocaleString()} ETB`
+														: "—"}
+												</TableCell>
+												<TableCell>
+													<Badge
+														variant="secondary"
+														className="text-xs capitalize"
+													>
+														{s.status?.replace("_", " ")}
+													</Badge>
+												</TableCell>
+												<TableCell className="text-sm text-muted-foreground">
+													{new Date(s.updatedAt).toLocaleDateString()}
+												</TableCell>
+												<TableCell className="text-right">
+													<Button
+														size="sm"
+														variant="outline"
+														onClick={() => router.push(`/admin/pitch/${s._id}`)}
+													>
+														{t.pitch.viewFullPitch}
+													</Button>
+												</TableCell>
+											</TableRow>
+										))
+									)}
+								</TableBody>
+							</Table>
+							{totalSubmissionPages > 1 && (
+								<div className="flex items-center justify-end space-x-2 p-4 border-t border-border/50">
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => setSubmissionPage((p) => Math.max(1, p - 1))}
+										disabled={submissionPage === 1}
+									>
+										Previous
+									</Button>
+									<span className="text-sm text-muted-foreground bg-muted/20 px-3 py-1 rounded-md border border-border/50">
+										Page {submissionPage} of {totalSubmissionPages}
+									</span>
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() =>
+											setSubmissionPage((p) =>
+												Math.min(totalSubmissionPages, p + 1),
+											)
+										}
+										disabled={submissionPage === totalSubmissionPages}
+									>
+										Next
+									</Button>
+								</div>
+							)}
+						</Card>
+					</TabsContent>
+
+					{/* ─── Manage Admins Tab (Super Admin Only) ─── */}
+					{isSuperAdmin && (
+						<TabsContent value="admins">
+							<Card>
+								<CardHeader className="pb-3 flex flex-row items-center justify-between">
+									<CardTitle className="text-base flex items-center gap-2">
+										<Crown className="h-4 w-4 text-amber-500" />
+										{t.adminUsers.adminTeam}
+									</CardTitle>
+									<Button
+										size="sm"
+										className="gap-1.5"
+										onClick={() => setShowInviteDialog(true)}
+									>
+										<Plus className="h-3.5 w-3.5" />
+										{t.adminUsers.addAdmin}
+									</Button>
+								</CardHeader>
+								<Table>
+									<TableHeader>
+										<TableRow>
+											<TableHead>{t.admin.name}</TableHead>
+											<TableHead>{t.admin.email}</TableHead>
+											<TableHead>{t.adminUsers.level}</TableHead>
+											<TableHead>{t.admin.joined}</TableHead>
+											<TableHead className="text-right">{t.admin.actions}</TableHead>
+										</TableRow>
+									</TableHeader>
+									<TableBody>
+										{adminList.length === 0 ? (
+											<TableRow>
+												<TableCell
+													colSpan={5}
+													className="text-center py-8 text-muted-foreground"
+												>
+													{t.adminUsers.noAdminsFound}
+												</TableCell>
+											</TableRow>
+										) : (
+											adminList.map((a) => (
+												<TableRow key={a._id}>
+													<TableCell className="font-medium">
+														<div className="flex items-center gap-2">
+															{a.fullName}
+															{a.adminLevel === "super_admin" && (
+																<Crown className="h-3.5 w-3.5 text-amber-500" />
+															)}
+														</div>
+													</TableCell>
+													<TableCell className="text-muted-foreground text-sm">
+														{a.email}
+													</TableCell>
+													<TableCell>
+														<Badge
+															variant={
+																a.adminLevel === "super_admin"
+																	? "default"
+																	: "secondary"
+															}
+															className="text-xs capitalize"
+														>
+															{a.adminLevel === "super_admin"
+																? t.adminUsers.superAdmin
+																: t.adminUsers.roleAdmin}
+														</Badge>
+													</TableCell>
+													<TableCell className="text-sm text-muted-foreground">
+														{new Date(a.createdAt).toLocaleDateString()}
+													</TableCell>
+													<TableCell className="text-right">
+														{a.adminLevel !== "super_admin" ? (
+															<Button
+																size="sm"
+																variant="ghost"
+																className="text-destructive hover:text-destructive hover:bg-destructive/10 gap-1.5"
+																onClick={() =>
+																	setAdminToRemove({
+																		id: a._id,
+																		name: a.fullName,
+																	})
+																}
+															>
+																<Trash2 className="h-3.5 w-3.5" />
+																{t.adminUsers.remove}
+															</Button>
+														) : (
+															<span className="text-xs text-muted-foreground">
+																{t.adminUsers.protectedUser}
+															</span>
+														)}
+													</TableCell>
+												</TableRow>
+											))
+										)}
+									</TableBody>
+								</Table>
+							</Card>
+
+							{/* Invite Admin Dialog */}
+							<Dialog
+								open={showInviteDialog}
+								onOpenChange={(open) => {
+									setShowInviteDialog(open);
+									if (!open) {
+										setInviteLink("");
+										setAddByEmail("");
+									}
+								}}
+							>
+								<DialogContent className="sm:max-w-md">
+									<DialogHeader>
+										<DialogTitle className="flex items-center gap-2">
+											<ShieldAlert className="h-5 w-5 text-primary" />
+											{t.adminUsers.addNewAdmin}
+										</DialogTitle>
+										<DialogDescription>
+											{t.adminUsers.addNewAdminDesc}
+										</DialogDescription>
+									</DialogHeader>
+									<Tabs defaultValue="add-by-email" className="mt-2">
+										<TabsList className="w-full">
+											<TabsTrigger
+												value="add-by-email"
+												className="flex-1 gap-1.5"
+											>
+												<Mail className="h-3.5 w-3.5" />
+												{t.adminUsers.addByEmail}
+											</TabsTrigger>
+											<TabsTrigger
+												value="invite-link"
+												className="flex-1 gap-1.5"
+											>
+												<Link2 className="h-3.5 w-3.5" />
+												{t.adminUsers.inviteLink}
+											</TabsTrigger>
+										</TabsList>
+
+										{/* Add by Email Tab */}
+										<TabsContent value="add-by-email" className="mt-4">
+											<div className="space-y-4">
+												<div className="flex h-14 w-14 mx-auto items-center justify-center rounded-full bg-primary/10">
+													<Mail className="h-7 w-7 text-primary" />
+												</div>
+												<p className="text-sm text-muted-foreground text-center">
+													{t.adminUsers.promoteByEmailDesc}
+												</p>
+												<div className="space-y-2">
+													<Label
+														htmlFor="admin-email"
+														className="text-sm font-medium"
+													>
+														{t.adminUsers.userEmail}
+													</Label>
+													<Input
+														id="admin-email"
+														type="email"
+														placeholder="user@example.com"
+														value={addByEmail}
+														onChange={(e) => setAddByEmail(e.target.value)}
+														onKeyDown={(e) => {
+															if (e.key === "Enter" && addByEmail.trim()) {
+																handleAddAdminByEmail();
+															}
+														}}
+													/>
+												</div>
+												<Button
+													className="w-full gap-2"
+													onClick={handleAddAdminByEmail}
+													disabled={addByEmailLoading || !addByEmail.trim()}
+												>
+													{addByEmailLoading ? (
+														<Loader2 className="h-4 w-4 animate-spin" />
+													) : (
+														<ShieldCheck className="h-4 w-4" />
+													)}
+													{addByEmailLoading
+														? t.adminUsers.promoting
+														: t.adminUsers.promoteToAdmin}
+												</Button>
+												<p className="text-xs text-muted-foreground/70 text-center">
+													{t.adminUsers.userMustHaveAccount}
+												</p>
+											</div>
+										</TabsContent>
+
+										{/* Invite Link Tab */}
+										<TabsContent value="invite-link" className="mt-4">
+											{inviteLink ? (
+												<div className="space-y-3">
+													<div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-3">
+														<Link2 className="h-4 w-4 text-primary shrink-0" />
+														<code className="text-xs flex-1 break-all select-all text-foreground">
+															{inviteLink}
+														</code>
+													</div>
+													<Button
+														className="w-full gap-2"
+														onClick={() => {
+															navigator.clipboard.writeText(inviteLink);
+															showSuccessToast("Link copied to clipboard!");
+														}}
+													>
+														<Copy className="h-4 w-4" />
+														{t.adminUsers.copyLink}
+													</Button>
+													<p className="text-xs text-muted-foreground text-center">
+														{t.adminUsers.shareInviteLink}
+													</p>
+												</div>
+											) : (
+												<div className="text-center space-y-4">
+													<div className="flex h-14 w-14 mx-auto items-center justify-center rounded-full bg-primary/10">
+														<Link2 className="h-7 w-7 text-primary" />
+													</div>
+													<p className="text-sm text-muted-foreground">
+														{t.adminUsers.generateInviteDesc}
+													</p>
+													<Button
+														onClick={handleInviteAdmin}
+														disabled={inviting}
+														className="gap-2"
+													>
+														{inviting ? (
+															<Loader2 className="h-4 w-4 animate-spin" />
+														) : (
+															<Plus className="h-4 w-4" />
+														)}
+														{inviting
+															? t.adminUsers.generating
+															: t.adminUsers.generateInviteLink}
+													</Button>
+												</div>
+											)}
+										</TabsContent>
+									</Tabs>
+								</DialogContent>
+							</Dialog>
+
+							{/* Remove Admin Confirm Dialog */}
+							<Dialog
+								open={!!adminToRemove}
+								onOpenChange={(open) => {
+									if (!open) setAdminToRemove(null);
+								}}
+							>
+								<DialogContent className="sm:max-w-md">
+									<DialogHeader>
+										<DialogTitle className="flex items-center gap-2 text-destructive">
+											<ShieldAlert className="h-5 w-5" />
+											{t.adminUsers.removeAdminAccess}
+										</DialogTitle>
+										<DialogDescription>
+											{t.adminUsers.removeAdminConfirmPrefix}{" "}
+											<strong>{adminToRemove?.name}</strong> {t.adminUsers.removeAdminConfirm}
+										</DialogDescription>
+									</DialogHeader>
+									<DialogFooter className="mt-4">
+										<Button
+											variant="outline"
+											onClick={() => setAdminToRemove(null)}
+										>
+											{t.common.cancel}
+										</Button>
+										<Button variant="destructive" onClick={handleRemoveAdmin}>
+											{t.adminUsers.removeAdmin}
+										</Button>
+									</DialogFooter>
+								</DialogContent>
+							</Dialog>
+						</TabsContent>
+					)}
+				</Tabs>
+
+				{/* ─── User Management / KYC Review Dialog ─── */}
+				<Dialog
+					open={!!actionUser}
+					onOpenChange={() => {
+						setActionUser(null);
+						setActionUserProfile(null);
+						setRejectionReason("");
+					}}
+				>
+					<DialogContent className="sm:max-w-3xl lg:max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0">
+						<div className="px-6 pt-6 pb-4 shrink-0">
+							<DialogHeader>
+								<DialogTitle className="flex items-center gap-2">
+									{actionUser?.status === "pending" ? (
+										<>
+											<ShieldCheck className="h-5 w-5 text-primary" />
+											{t.adminUsers.kycReview}
+										</>
+									) : (
+										<>
+											<Users className="h-5 w-5" />
+											{t.adminUsers.manageUser}
+										</>
+									)}
+								</DialogTitle>
+								{actionUser?.status === "pending" && (
+									<DialogDescription>
+										{t.adminUsers.kycReviewDesc}
+									</DialogDescription>
+								)}
+							</DialogHeader>
+						</div>
+						<div className="flex-1 overflow-y-auto override-scrollbar">
+							{actionUser && (
+								<div className="space-y-5 px-6 pb-2">
+									{/* User Info */}
+									<div className="rounded-xl bg-muted/30 border border-border/50 p-4">
+										<div className="flex items-center gap-4">
+											<Avatar className="h-12 w-12 border-2 border-primary/10">
+												<AvatarFallback className="bg-primary/10 text-primary text-sm font-bold">
+													{(actionUser.fullName || "U")
+														.split(" ")
+														.map((n) => n[0])
+														.join("")
+														.toUpperCase()
+														.slice(0, 2)}
+												</AvatarFallback>
+											</Avatar>
+											<div className="flex-1 min-w-0">
+												<p className="font-semibold text-base">
+													{actionUser.fullName}
+												</p>
+												<p className="text-sm text-muted-foreground">
+													{actionUser.email}
+												</p>
+												<div className="flex gap-2 mt-2">
+													<Badge
+														variant={roleBadge(actionUser.role)}
+														className="text-xs capitalize"
+													>
+														{actionUser.role}
+													</Badge>
+													<Badge
+														variant={statusBadge(actionUser.status)}
+														className="text-xs capitalize"
+													>
+														{actionUser.status}
+													</Badge>
+												</div>
+											</div>
+										</div>
+									</div>
+
+									{/* KYC Documents */}
+									<Separator />
+									<div className="space-y-3">
+										<h4 className="text-sm font-semibold flex items-center gap-2">
+											<FileText className="h-4 w-4" />
+											{t.adminUsers.kycDocuments}
+										</h4>
+
+										{loadingProfile ? (
+											<div className="flex items-center justify-center py-8">
+												<Loader2 className="h-5 w-5 animate-spin text-primary" />
+												<p className="ml-2 text-sm text-muted-foreground">
+													{t.adminUsers.loadingDocs}
+												</p>
+											</div>
+										) : actionUserProfile &&
+											Object.keys(actionUserProfile).length > 0 ? (
+											<div className="space-y-3">
+												{/* National ID — Common for both roles */}
+												<DocLink
+													url={actionUserProfile.nationalIdUrl}
+													label={t.adminUsers.ethiopianNationalId}
+													missing={t.adminUsers.nationalIdMissing}
+												/>
+
+												{/* Role-specific documents */}
+												{actionUser.role === "entrepreneur" && (
+													<>
+														<DocLink
+															url={actionUserProfile.businessLicenseUrl}
+															label={t.adminUsers.businessLicense}
+															missing={t.adminUsers.businessLicenseMissing}
+														/>
+														<DocLink
+															url={actionUserProfile.tinNumber}
+															label={t.adminUsers.tinCertificate}
+															missing={t.adminUsers.tinCertificateMissing}
+														/>
+													</>
+												)}
+
+												{actionUser.role === "investor" && (
+													<DocLink
+														url={actionUserProfile.accreditationDocumentUrl}
+														label={t.adminUsers.financialAccreditation}
+														missing={t.adminUsers.accreditationMissing}
+													/>
+												)}
+											</div>
+										) : (
+											<div className="rounded-lg border border-dashed p-4 text-center">
+												<AlertCircle className="h-5 w-5 text-muted-foreground/50 mx-auto mb-2" />
+												<p className="text-sm text-muted-foreground">
+													{t.adminUsers.noProfileFound}
+												</p>
+											</div>
+										)}
+									</div>
+
+									{/* Quick Actions for Pending Users */}
+									{actionUser.status === "pending" && (
+										<>
+											<Separator />
+											<div className="space-y-3">
+												<h4 className="text-sm font-semibold">{t.adminUsers.quickActions}</h4>
+												<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+													<Button
+														className="gap-2"
+														onClick={() => handleStatusUpdate("verified")}
+													>
+														<ShieldCheck className="h-4 w-4" />
+														{t.adminUsers.approveKyc}
+													</Button>
+													<Button
+														variant="destructive"
+														className="gap-2"
+														onClick={() => {
+															if (!rejectionReason.trim()) {
+																setNewStatus("reject-prompt");
+																return;
+															}
+															handleStatusUpdate("unverified", rejectionReason);
+														}}
+													>
+														<ShieldX className="h-4 w-4" />
+														{t.adminUsers.rejectKyc}
+													</Button>
+												</div>
+
+												{/* Rejection reason textarea */}
+												{(newStatus === "reject-prompt" || rejectionReason) && (
+													<div className="space-y-2">
+														<Label
+															htmlFor="rejection-reason"
+															className="text-sm font-medium text-destructive"
+														>
+															{t.adminUsers.rejectionReasonRequired}
+														</Label>
+														<Textarea
+															id="rejection-reason"
+															placeholder={t.adminUsers.rejectionReasonPlaceholder}
+															value={rejectionReason}
+															onChange={(e) =>
+																setRejectionReason(e.target.value)
+															}
+															className="min-h-[80px]"
+														/>
+														{newStatus === "reject-prompt" && (
+															<Button
+																variant="destructive"
+																size="sm"
+																disabled={!rejectionReason.trim()}
+																onClick={() =>
+																	handleStatusUpdate(
+																		"unverified",
+																		rejectionReason,
+																	)
+																}
+															>
+																{t.adminUsers.confirmRejection}
+															</Button>
+														)}
+													</div>
+												)}
+											</div>
+										</>
+									)}
+
+									{/* General Status Update (non-pending users) */}
+									{actionUser.status !== "pending" && (
+										<>
+											<Separator />
+											<div className="space-y-2">
+												<div className="text-sm font-medium">{t.adminUsers.updateStatus}</div>
+												<Select value={newStatus} onValueChange={setNewStatus}>
+													<SelectTrigger>
+														<SelectValue />
+													</SelectTrigger>
+													<SelectContent>
+														<SelectItem value="unverified">
+															{t.adminUsers.statusUnverified}
+														</SelectItem>
+														<SelectItem value="pending">{t.adminUsers.statusPending}</SelectItem>
+														<SelectItem value="verified">{t.adminUsers.statusVerified}</SelectItem>
+														<SelectItem value="suspended">{t.adminUsers.statusSuspended}</SelectItem>
+													</SelectContent>
+												</Select>
+
+												{newStatus === "unverified" &&
+													actionUser.status !== "unverified" && (
+														<Textarea
+															placeholder={t.adminUsers.optionalReason}
+															value={rejectionReason}
+															onChange={(e) =>
+																setRejectionReason(e.target.value)
+															}
+															className="min-h-[60px]"
+														/>
+													)}
+											</div>
+										</>
+									)}
+								</div>
+							)}
+						</div>
+						<div className="px-6 py-4 border-t bg-background shrink-0 rounded-b-lg">
+							<DialogFooter>
+								<Button
+									variant="outline"
+									onClick={() => {
+										setActionUser(null);
+										setActionUserProfile(null);
+										setRejectionReason("");
+									}}
+								>
+									{t.common.cancel}
+								</Button>
+								{actionUser?.status !== "pending" && (
+									<Button onClick={() => handleStatusUpdate()}>
+										{t.common.save}
+									</Button>
+								)}
+							</DialogFooter>
+						</div>
+					</DialogContent>
+				</Dialog>
+			</DashboardLayout>
+
+			<Dialog
+				open={!!selectedSubmission}
+				onOpenChange={(op) => !op && setSelectedSubmission(null)}
+			>
+				<DialogContent className="sm:max-w-2xl bg-card border-border">
+					<DialogHeader>
+						<DialogTitle>
+							AI Flag Override: {selectedSubmission?.title}
+						</DialogTitle>
+						<DialogDescription>
+							Manually unblock documents that were flagged by AI as 'Suspicious'
+							or 'Fraudulent'.
+						</DialogDescription>
+					</DialogHeader>
+
+					<div className="py-4 space-y-4">
+						{loadingDocs ? (
+							<p className="text-sm text-muted-foreground flex items-center gap-2">
+								<Loader2 className="h-4 w-4 animate-spin" /> Loading
+								documents...
+							</p>
+						) : submissionDocs.length === 0 ? (
+							<p className="text-sm text-muted-foreground">
+								No documents found for this submission.
+							</p>
+						) : (
+							<div className="space-y-3">
+								{submissionDocs.map((doc) => (
+									<div
+										key={doc._id}
+										className="border p-3 rounded-lg flex items-center justify-between"
+									>
+										<div className="flex flex-col gap-1 min-w-0 pr-4">
+											<div className="flex items-center gap-2">
+												<span className="font-medium text-sm truncate">
+													{doc.filename}
+												</span>
+												<Badge
+													variant={
+														doc.status === "flagged"
+															? "destructive"
+															: doc.status === "failed"
+																? "destructive"
+																: "secondary"
+													}
+												>
+													{doc.status}
+												</Badge>
+											</div>
+											{doc.processingError && (
+												<span className="text-xs text-destructive mt-1">
+													<b>AI Reason:</b> {doc.processingError}
+												</span>
+											)}
+										</div>
+										<div className="flex gap-2">
+											<a
+												href={doc.url}
+												target="_blank"
+												rel="noopener noreferrer"
+											>
+												<Button size="sm" variant="ghost">
+													View
+												</Button>
+											</a>
+											{(doc.status === "flagged" ||
+												doc.status === "failed") && (
+												<Button
+													size="sm"
+													variant="outline"
+													className="border-amber-500 text-amber-600 hover:bg-amber-50 hover:text-amber-700"
+													onClick={() => handleOverrideFlag(doc._id)}
+												>
+													Override Flag
+												</Button>
+											)}
+										</div>
+									</div>
+								))}
+							</div>
+						)}
+					</div>
+					<DialogFooter className="border-t pt-4 flex flex-col sm:flex-row gap-2">
+						<div className="flex w-full items-center justify-between">
+							<Button
+								variant="outline"
+								className="text-red-600 hover:text-red-700 hover:bg-red-50"
+								onClick={() => handlePitchStatusUpdate("suspended")}
+							>
+								Suspend Pitch (SC-23)
+							</Button>
+							<div className="flex gap-2">
+								<Button
+									variant="outline"
+									onClick={() => handlePitchStatusUpdate("rejected")}
+								>
+									Reject
+								</Button>
+								<Button
+									className="bg-green-600 hover:bg-green-700"
+									onClick={() => handlePitchStatusUpdate("approved")}
+								>
+									Fully Approve Pitch
+								</Button>
+							</div>
+						</div>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</ProtectedRoute>
+	);
+}
