@@ -1,0 +1,1204 @@
+"use client";
+
+import {
+	ArrowLeft,
+	CalendarDays,
+	Check,
+	CheckCheck,
+	Clock,
+	Languages,
+	Loader2,
+	MessageSquare,
+	Paperclip,
+	Send,
+	ShieldAlert,
+	Video,
+} from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import DashboardLayout from "@/components/DashboardLayout";
+import ProtectedRoute from "@/components/ProtectedRoute";
+import ScheduleMeetingModal, {
+	type ScheduledMeeting,
+} from "@/components/ScheduleMeetingModal";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { ENTREPRENEUR_NAV, INVESTOR_NAV } from "@/constants/navigation";
+import { useAuth } from "@/context/AuthContext";
+import { useLanguage } from "@/i18n/LanguageContext";
+import {
+	showErrorToast,
+	showInfoToast,
+	showSuccessToast,
+	showWarningToast,
+} from "@/lib/toast-messages";
+
+const MEETING_PREFIX = "MEETING_CARD:";
+
+interface MeetingCardData {
+	_id: string;
+	title: string;
+	scheduledAt: string;
+	durationMinutes: number;
+	livekitRoomName: string;
+	status: string;
+}
+
+function parseMeetingCard(body: string): MeetingCardData | null {
+	if (!body.startsWith(MEETING_PREFIX)) return null;
+	try {
+		return JSON.parse(body.slice(MEETING_PREFIX.length)) as MeetingCardData;
+	} catch {
+		return null;
+	}
+}
+
+function MeetingCard({
+	data,
+	onJoin,
+}: {
+	data: MeetingCardData;
+	onJoin: (meetingId: string) => void;
+}) {
+	const { t } = useLanguage();
+	const scheduled = new Date(data.scheduledAt);
+	const now = new Date();
+	const isJoinable =
+		(data.status === "scheduled" || data.status === "ongoing") &&
+		scheduled.getTime() - now.getTime() < 15 * 60 * 1000; // within 15 min
+
+	return (
+		<div className="rounded-xl border border-primary/20 bg-primary/5 p-3 min-w-[240px] max-w-[300px]">
+			<div className="flex items-center gap-2 mb-2">
+				<Video className="h-4 w-4 text-primary shrink-0" />
+				<span className="text-sm font-semibold text-primary">
+					{t.meetings.videoMeeting}
+				</span>
+			</div>
+			<p className="text-xs font-medium mb-1 truncate">{data.title}</p>
+			<div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+				<CalendarDays className="h-3 w-3" />
+				{scheduled.toLocaleDateString(undefined, {
+					weekday: "short",
+					month: "short",
+					day: "numeric",
+				})}
+			</div>
+			<div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
+				<Clock className="h-3 w-3" />
+				{scheduled.toLocaleTimeString(undefined, {
+					hour: "2-digit",
+					minute: "2-digit",
+				})}
+				{" Â· "}
+				{data.durationMinutes} min
+			</div>
+			{isJoinable ? (
+				<Button
+					size="sm"
+					className="w-full bg-green-600 hover:bg-green-700 gap-1.5"
+					onClick={() => onJoin(data._id)}
+				>
+					<Video className="h-3.5 w-3.5" />
+					{t.meetings.joinNow}
+				</Button>
+			) : (
+				<p className="text-xs text-center text-muted-foreground">
+					{data.status === "cancelled"
+						? t.meetings.meetingCancelled
+						: data.status === "completed"
+							? t.meetings.meetingEnded
+							: t.meetings.joinAppears}
+				</p>
+			)}
+		</div>
+	);
+}
+
+/* â”€â”€ Types â”€â”€ */
+interface Participant {
+	_id: string;
+	fullName: string;
+	email: string;
+	role?: string;
+}
+
+interface LastMessagePreview {
+	body: string;
+	senderId: string | { _id: string; fullName: string };
+	createdAt: string;
+	type: "text" | "file";
+}
+
+interface Conversation {
+	_id: string;
+	participants: Participant[];
+	lastMessageAt?: string;
+	isArchived: boolean;
+	createdAt: string;
+	unreadCount?: number;
+	lastMessage?: LastMessagePreview | null;
+	submissionId?: { _id: string; title: string } | string | null;
+}
+
+interface ReadReceipt {
+	userId: string;
+	readAt: string;
+}
+
+interface Message {
+	_id: string;
+	conversationId: string;
+	senderId: string | { _id: string; fullName: string };
+	body: string;
+	type: "text" | "file";
+	attachmentUrl?: string;
+	readBy?: ReadReceipt[];
+	createdAt: string;
+}
+
+interface LocalProfile {
+	_id: string;
+	role: string;
+	displayName?: string | null;
+	email?: string | null;
+}
+
+/* â”€â”€ Helpers â”€â”€ */
+function formatTime(dateStr: string) {
+	return new Date(dateStr).toLocaleTimeString([], {
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
+function formatDateSeparator(dateStr: string, t: any) {
+	const d = new Date(dateStr);
+	const today = new Date();
+	const yesterday = new Date();
+	yesterday.setDate(yesterday.getDate() - 1);
+
+	if (d.toDateString() === today.toDateString()) return t.messages.today;
+	if (d.toDateString() === yesterday.toDateString()) return t.messages.yesterday;
+	return d.toLocaleDateString(undefined, {
+		weekday: "long",
+		month: "short",
+		day: "numeric",
+	});
+}
+
+function getInitials(name?: string) {
+	return (name || "??").slice(0, 2).toUpperCase();
+}
+
+/* â”€â”€ Color palette for avatars â”€â”€ */
+const AVATAR_COLORS = [
+	"bg-violet-500/15 text-violet-600",
+	"bg-sky-500/15 text-sky-600",
+	"bg-emerald-500/15 text-emerald-600",
+	"bg-amber-500/15 text-amber-600",
+	"bg-rose-500/15 text-rose-600",
+	"bg-indigo-500/15 text-indigo-600",
+];
+
+function avatarColor(id: string) {
+	let hash = 0;
+	for (let i = 0; i < id.length; i++) {
+		hash = id.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
+function RoleBadge({ role }: { role?: string }) {
+	const { t } = useLanguage();
+	if (!role) return null;
+	const styles: Record<string, string> = {
+		admin: "bg-destructive/10 text-destructive border-transparent",
+		investor: "bg-blue-500/10 text-blue-700 border-transparent",
+		entrepreneur: "bg-amber-500/10 text-amber-700 border-transparent",
+	};
+	const label: Record<string, string> = {
+		admin: t.adminUsers?.roleAdmin || "Admin",
+		investor: t.adminUsers?.roleInvestor || "Investor",
+		entrepreneur: t.adminUsers?.roleEntrepreneur || "Entrepreneur",
+	};
+
+	return (
+		<Badge
+			variant="outline"
+			className={`text-[8.5px] font-bold px-1 py-0 h-[14px] leading-none rounded-[3px] uppercase shrink-0 tracking-wider ${styles[role] || "bg-muted text-muted-foreground"}`}
+		>
+			{label[role] || role}
+		</Badge>
+	);
+}
+
+function MessagesContent() {
+	const { user, userProfile } = useAuth();
+	const { t } = useLanguage();
+	const searchParams = useSearchParams();
+	const router = useRouter();
+	const [conversations, setConversations] = useState<Conversation[]>([]);
+	const [activeConvo, setActiveConvo] = useState<Conversation | null>(null);
+	const [messages, setMessages] = useState<Message[]>([]);
+	const [initialLoading, setInitialLoading] = useState(true);
+	const [loadingMessages, setLoadingMessages] = useState(false);
+	const [messageBody, setMessageBody] = useState("");
+	const [sending, setSending] = useState(false);
+	const [showReportDialog, setShowReportDialog] = useState(false);
+	const [reportReason, setReportReason] = useState("");
+	const [reportDetails, setReportDetails] = useState("");
+	const [reportLoading, setReportLoading] = useState(false);
+	const [showScheduleModal, setShowScheduleModal] = useState(false);
+	const messagesEndRef = useRef<HTMLDivElement>(null);
+	const inputRef = useRef<HTMLInputElement>(null);
+	const hasAutoOpenedRef = useRef(false);
+	const scrollContainerRef = useRef<HTMLDivElement>(null);
+	const isNearBottomRef = useRef(true);
+	const [translations, setTranslations] = useState<Record<string, string>>({});
+	const [translating, setTranslating] = useState<Record<string, boolean>>({});
+
+	const api = (
+		process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"
+	).replace(/\/+$/, "");
+
+	// Typed cast â€” UserProfile from AuthContext has _id and role at runtime
+	const profile = userProfile as unknown as LocalProfile | null;
+
+	const getToken = useCallback(async () => {
+		if (!user) return "";
+		return user.getIdToken();
+	}, [user]);
+
+	/* â”€â”€ Load conversations (seamless â€” no loading flash on poll) â”€â”€ */
+	const loadConversations = useCallback(
+		async (isInitial = false) => {
+			if (!user) return;
+			if (isInitial) setInitialLoading(true);
+			try {
+				const token = await getToken();
+				const res = await fetch(`${api}/messages/conversations`, {
+					headers: { Authorization: `Bearer ${token}` },
+				});
+				if (res.ok) {
+					const { conversations: convos } = await res.json();
+					setConversations(convos || []);
+
+					// Update the activeConvo reference with fresh data (preserve selection)
+					setActiveConvo((prev) => {
+						if (!prev) return prev;
+						const updated = (convos || []).find(
+							(c: Conversation) => c._id === prev._id,
+						);
+						return updated || prev;
+					});
+				}
+			} catch (err) {
+				console.error("Failed to load conversations", err);
+			} finally {
+				if (isInitial) setInitialLoading(false);
+			}
+		},
+		[user, api, getToken],
+	);
+
+	// Initial load
+	useEffect(() => {
+		loadConversations(true);
+	}, [loadConversations]);
+
+	/* â”€â”€ Auto-open conversation from URL ?open=conversationId â”€â”€ */
+	useEffect(() => {
+		if (hasAutoOpenedRef.current || !user || initialLoading) return;
+		const openId = searchParams.get("open");
+		if (!openId) return;
+
+		// Check if the conversation is already in the list
+		const convo = conversations.find((c) => c._id === openId);
+		if (convo) {
+			setActiveConvo(convo);
+			hasAutoOpenedRef.current = true;
+			return;
+		}
+
+		// If not in the list (e.g. brand new empty conversation), fetch it directly
+		(async () => {
+			try {
+				const token = await getToken();
+				const res = await fetch(`${api}/messages/conversations/${openId}`, {
+					headers: { Authorization: `Bearer ${token}` },
+				});
+				if (res.ok) {
+					const data = await res.json();
+					if (data.conversation) {
+						// Inject it at the top of the conversation list so it shows in sidebar
+						setConversations((prev) => {
+							const exists = prev.some((c) => c._id === data.conversation._id);
+							return exists ? prev : [data.conversation, ...prev];
+						});
+						setActiveConvo(data.conversation);
+						hasAutoOpenedRef.current = true;
+					}
+				}
+			} catch (err) {
+				console.error("Failed to fetch conversation for auto-open", err);
+			}
+		})();
+	}, [searchParams, conversations, user, initialLoading, api, getToken]);
+
+	/* â”€â”€ Auto-mark message notifications as read when chat page opens â”€â”€ */
+	useEffect(() => {
+		if (!user) return;
+		(async () => {
+			try {
+				const token = await user.getIdToken();
+				const res = await fetch(`${api}/messages/notifications`, {
+					headers: { Authorization: `Bearer ${token}` },
+				});
+				if (!res.ok) return;
+				const { notifications } = await res.json();
+				const unreadMsgNotifs = (notifications || []).filter(
+					(n: { isRead: boolean; type: string }) =>
+						!n.isRead && n.type === "message_received",
+				);
+				for (const n of unreadMsgNotifs) {
+					fetch(`${api}/messages/notifications/${n._id}/read`, {
+						method: "PATCH",
+						headers: { Authorization: `Bearer ${token}` },
+					}).catch(() => {});
+				}
+			} catch {}
+		})();
+	}, [user, api]);
+
+	/* â”€â”€ Load messages for active conversation â”€â”€ */
+	const loadMessages = useCallback(
+		async (conversationId: string, backgroundMode = false) => {
+			if (!user) return;
+			if (!backgroundMode) setLoadingMessages(true);
+			try {
+				const token = await getToken();
+				const res = await fetch(
+					`${api}/messages/conversations/${conversationId}/messages?limit=100`,
+					{ headers: { Authorization: `Bearer ${token}` } },
+				);
+				if (res.ok) {
+					const { messages: msgs } = await res.json();
+					setMessages(msgs || []);
+				}
+
+				// Mark as read
+				await fetch(`${api}/messages/conversations/${conversationId}/read`, {
+					method: "POST",
+					headers: { Authorization: `Bearer ${await getToken()}` },
+				});
+
+				// Update unread count locally
+				setConversations((prev) =>
+					prev.map((c) =>
+						c._id === conversationId ? { ...c, unreadCount: 0 } : c,
+					),
+				);
+			} catch (err) {
+				console.error("Failed to load messages", err);
+			} finally {
+				if (!backgroundMode) setLoadingMessages(false);
+			}
+		},
+		[user, api, getToken],
+	);
+
+	const activeConvoId = activeConvo?._id;
+
+	// Reset scroll anchor when opening a new chat
+	useEffect(() => {
+		isNearBottomRef.current = true;
+	}, []);
+
+	const handleScroll = useCallback(() => {
+		if (scrollContainerRef.current) {
+			const { scrollTop, scrollHeight, clientHeight } =
+				scrollContainerRef.current;
+			// Lock to bottom if within roughly 150px
+			isNearBottomRef.current = scrollHeight - scrollTop - clientHeight < 150;
+		}
+	}, []);
+
+	useEffect(() => {
+		if (activeConvoId) {
+			loadMessages(activeConvoId);
+			// Focus input
+			setTimeout(() => inputRef.current?.focus(), 100);
+		}
+	}, [activeConvoId, loadMessages]);
+
+	// Auto scroll only when at the bottom (prevents jumping when reading old messages)
+	// We enforce direct scroll height manipulation for maximum instant jump reliability
+	useEffect(() => {
+		if (isNearBottomRef.current && scrollContainerRef.current) {
+			const timeout = setTimeout(() => {
+				if (scrollContainerRef.current) {
+					scrollContainerRef.current.scrollTop =
+						scrollContainerRef.current.scrollHeight;
+				}
+			}, 50);
+			return () => clearTimeout(timeout);
+		}
+	}, []);
+
+	// Poll for new messages every 5 seconds (background, no flicker)
+	useEffect(() => {
+		if (!activeConvoId) return;
+		const interval = setInterval(() => {
+			loadMessages(activeConvoId, true);
+		}, 5000);
+		return () => clearInterval(interval);
+	}, [activeConvoId, loadMessages]);
+
+	// Poll for conversation list updates every 10 seconds (background, no flicker)
+	useEffect(() => {
+		const interval = setInterval(() => {
+			if (user) loadConversations(false);
+		}, 10000);
+		return () => clearInterval(interval);
+	}, [user, loadConversations]);
+
+	/* â”€â”€ Send message â”€â”€ */
+	const handleSend = async () => {
+		if (!messageBody.trim() || !activeConvo || !user || !userProfile) return;
+		const body = messageBody.trim();
+		setSending(true);
+		setMessageBody("");
+
+		// Force scroll to bottom when user sends a message
+		isNearBottomRef.current = true;
+
+		// Optimistic message
+		const optimisticMsg: Message = {
+			_id: `temp-${Date.now()}`,
+			conversationId: activeConvo._id,
+			senderId: profile?._id || "",
+			body,
+			type: "text",
+			readBy: [
+				{ userId: profile?._id ?? "", readAt: new Date().toISOString() },
+			],
+			createdAt: new Date().toISOString(),
+		};
+		setMessages((prev) => [...prev, optimisticMsg]);
+
+		try {
+			const token = await getToken();
+			const res = await fetch(
+				`${api}/messages/conversations/${activeConvo._id}/messages`,
+				{
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ body, type: "text" }),
+				},
+			);
+			if (res.ok) {
+				const { data: savedMsg } = await res.json();
+				if (savedMsg) {
+					setMessages((prev) =>
+						prev.map((m) => (m._id === optimisticMsg._id ? savedMsg : m)),
+					);
+				}
+				// Refresh conversation list to update lastMessage preview
+				loadConversations(false);
+			} else {
+				setMessages((prev) => prev.filter((m) => m._id !== optimisticMsg._id));
+				const err = await res.json();
+				showErrorToast(err.message || t.messages.failedToSend);
+			}
+		} catch (_err) {
+			setMessages((prev) => prev.filter((m) => m._id !== optimisticMsg._id));
+			showErrorToast(t.messages.failedToSend);
+		} finally {
+			setSending(false);
+			inputRef.current?.focus();
+		}
+	};
+
+	/* â”€â”€ Report misconduct â”€â”€ */
+	const handleReport = async () => {
+		if (!reportReason.trim() || !activeConvo || !user) return;
+		setReportLoading(true);
+		try {
+			const token = await getToken();
+			const res = await fetch(
+				`${api}/messages/conversations/${activeConvo._id}/report`,
+				{
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({
+						reason: reportReason.trim(),
+						details: reportDetails.trim() || undefined,
+					}),
+				},
+			);
+			if (res.ok) {
+				showSuccessToast(
+					t.messages.reportSubmitted,
+				);
+				setShowReportDialog(false);
+				setReportReason("");
+				setReportDetails("");
+				loadConversations(false);
+				setActiveConvo(null);
+			} else {
+				const err = await res.json();
+				showErrorToast(err.message || t.messages.failedToSubmitReport);
+			}
+		} catch (_err) {
+			showErrorToast(t.messages.failedToSubmitReport);
+		} finally {
+			setReportLoading(false);
+		}
+	};
+
+	/* â”€â”€ Translate a message â”€â”€ */
+	const handleTranslate = async (msgId: string, text: string) => {
+		if (translating[msgId] || !user) return;
+
+		// Toggle off if already translated
+		if (translations[msgId]) {
+			setTranslations((prev) => {
+				const next = { ...prev };
+				delete next[msgId];
+				return next;
+			});
+			return;
+		}
+
+		setTranslating((prev) => ({ ...prev, [msgId]: true }));
+		try {
+			const token = await getToken();
+			// Auto-detect: if text has Amharic characters, translate to English; otherwise to Amharic
+			const hasAmharic = /[\u1200-\u137F]/.test(text);
+			const targetLang = hasAmharic ? "en" : "am";
+
+			const res = await fetch(`${api}/messages/translate`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ text, targetLang }),
+			});
+			if (res.ok) {
+				const data = await res.json();
+				setTranslations((prev) => ({ ...prev, [msgId]: data.translated }));
+			} else {
+				showErrorToast(t.messages.translationFailed);
+			}
+		} catch {
+			showErrorToast(t.messages.translationFailed);
+		} finally {
+			setTranslating((prev) => ({ ...prev, [msgId]: false }));
+		}
+	};
+
+	/* â”€â”€ Helpers â”€â”€ */
+	const getOtherParticipant = (convo: Conversation) => {
+		if (!userProfile) return null;
+		return (
+			convo.participants.find((p) => p._id !== profile?._id) ||
+			convo.participants[0]
+		);
+	};
+
+	const getSenderId = (msg: Message) => {
+		if (typeof msg.senderId === "string") return msg.senderId;
+		return msg.senderId._id;
+	};
+
+	const isReadByOther = (msg: Message) => {
+		if (!userProfile || !msg.readBy) return false;
+		const myId = profile?._id;
+		return msg.readBy.some(
+			(r) => r.userId !== myId && r.userId.toString() !== myId,
+		);
+	};
+
+	const getLastMessagePreview = (convo: Conversation) => {
+		if (!convo.lastMessage) return t.messages.noMessages;
+		const body = convo.lastMessage.body;
+		if (convo.lastMessage.type === "file") return "📎 " + t.messages.attachment;
+		return body.length > 40 ? `${body.slice(0, 40)}â€¦` : body;
+	};
+
+	const getLastMessageTime = (convo: Conversation) => {
+		const dateStr = convo.lastMessage?.createdAt || convo.lastMessageAt;
+		if (!dateStr) return "";
+		const d = new Date(dateStr);
+		const now = new Date();
+		if (d.toDateString() === now.toDateString()) {
+			return formatTime(dateStr);
+		}
+		const yesterday = new Date();
+		yesterday.setDate(yesterday.getDate() - 1);
+		if (d.toDateString() === yesterday.toDateString()) return t.messages.yesterday;
+		return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+	};
+
+	/* â”€â”€ Build date-grouped messages â”€â”€ */
+	const groupedMessages: { date: string; msgs: Message[] }[] = [];
+	let currentDate = "";
+	for (const msg of messages) {
+		const d = new Date(msg.createdAt).toDateString();
+		if (d !== currentDate) {
+			currentDate = d;
+			groupedMessages.push({ date: msg.createdAt, msgs: [msg] });
+		} else {
+			groupedMessages[groupedMessages.length - 1].msgs.push(msg);
+		}
+	}
+
+	const navItems =
+		profile?.role === "investor" ? INVESTOR_NAV : ENTREPRENEUR_NAV;
+
+	return (
+		<ProtectedRoute allowedRoles={["entrepreneur", "investor"]}>
+			<DashboardLayout navItems={navItems} title="SEPMS">
+				<div className="flex flex-col h-[calc(100vh-120px)]">
+					{/* Header */}
+					<div className="mb-4">
+						<h1 className="text-2xl font-bold tracking-tight">{t.nav.messages}</h1>
+						<p className="text-sm text-muted-foreground">
+							{t.messages.communicate}
+						</p>
+					</div>
+
+					<div className="flex flex-1 gap-0 sm:gap-1 min-h-0 rounded-xl overflow-hidden border border-border bg-card/50">
+						{/* â”€â”€ Sidebar: Conversation List â”€â”€ */}
+						<div
+							className={`w-full sm:w-80 md:w-96 shrink-0 flex flex-col bg-card border-r border-border ${
+								activeConvo ? "hidden sm:flex" : "flex"
+							}`}
+						>
+							<div className="px-4 py-3.5 border-b border-border bg-muted/20">
+								<p className="text-sm font-semibold tracking-tight">{t.messages.chats}</p>
+							</div>
+							<div className="flex-1 overflow-y-auto">
+								{initialLoading ? (
+									<div className="flex justify-center py-12">
+										<Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+									</div>
+								) : conversations.length === 0 ? (
+									<div className="flex flex-col items-center justify-center py-16 px-4 text-center">
+										<div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted/50 mb-4">
+											<MessageSquare className="h-7 w-7 text-muted-foreground/40" />
+										</div>
+										<p className="text-sm font-medium text-muted-foreground">
+											{t.messages.noConversations}
+										</p>
+										<p className="text-xs text-muted-foreground/60 mt-1 max-w-[200px]">
+											{t.messages.startConversation}
+										</p>
+									</div>
+								) : (
+									conversations.map((convo) => {
+										const other = getOtherParticipant(convo);
+										const isActive = activeConvo?._id === convo._id;
+										const unread = convo.unreadCount || 0;
+
+										return (
+											<button
+												type="button"
+												key={convo._id}
+												onClick={() => setActiveConvo(convo)}
+												className={`w-full text-left flex items-center gap-3 px-4 py-3 cursor-pointer transition-all duration-150 border-b border-border 
+													${isActive ? "bg-primary/8 border-l-[3px] border-l-primary" : "hover:bg-muted/40 border-l-[3px] border-l-transparent"}
+													${convo.isArchived ? "opacity-50" : ""}`}
+											>
+												<div className="relative">
+													<Avatar
+														className={`h-11 w-11 shrink-0 ${avatarColor(other?._id || "")}`}
+													>
+														<AvatarFallback className="text-xs font-bold">
+															{getInitials(other?.fullName)}
+														</AvatarFallback>
+													</Avatar>
+													{unread > 0 && (
+														<span className="absolute -top-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground shadow-sm">
+															{unread > 9 ? "9+" : unread}
+														</span>
+													)}
+												</div>
+												<div className="min-w-0 flex-1">
+													<div className="flex items-center justify-between gap-2">
+														<p
+															className={`text-sm truncate flex items-center gap-2 ${unread > 0 ? "font-bold" : "font-medium"}`}
+														>
+															<span className="truncate">
+																{other?.fullName || t.messages.unknown}
+															</span>
+															<RoleBadge role={other?.role} />
+														</p>
+														<span
+															className={`text-[11px] shrink-0 ${unread > 0 ? "text-primary font-semibold" : "text-muted-foreground"}`}
+														>
+															{getLastMessageTime(convo)}
+														</span>
+													</div>
+													{/* Show pitch title if this conversation is linked to a specific submission */}
+													{convo.submissionId &&
+														typeof convo.submissionId === "object" && (
+															<p className="text-[10px] text-primary/70 font-medium truncate mt-0.5">
+																ðŸ“Œ{" "}
+																{
+																	(
+																		convo.submissionId as {
+																			_id: string;
+																			title: string;
+																		}
+																	).title
+																}
+															</p>
+														)}
+													<div className="flex items-center justify-between gap-2 mt-0.5">
+														<p
+															className={`text-xs truncate ${unread > 0 ? "text-foreground font-medium" : "text-muted-foreground"}`}
+														>
+															{getLastMessagePreview(convo)}
+														</p>
+														{convo.isArchived && (
+															<Badge
+																variant="destructive"
+																className="text-[9px] shrink-0 px-1.5 py-0"
+															>
+																{t.messages.frozen}
+															</Badge>
+														)}
+													</div>
+												</div>
+											</button>
+										);
+									})
+								)}
+							</div>
+						</div>
+
+						{/* â”€â”€ Main Chat Area â”€â”€ */}
+						<div
+							className={`flex-1 flex flex-col bg-[hsl(var(--background))] overflow-hidden ${
+								!activeConvo ? "hidden sm:flex" : "flex"
+							}`}
+						>
+							{!activeConvo ? (
+								<div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
+									<div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted/30 mb-4">
+										<MessageSquare className="h-9 w-9 opacity-30" />
+									</div>
+									<p className="text-base font-medium">{t.messages.selectConversation}</p>
+									<p className="text-xs text-muted-foreground/60 mt-1">
+										{t.messages.chooseFromChats}
+									</p>
+								</div>
+							) : (
+								<>
+									{/* Chat Header */}
+									<div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-card/80 backdrop-blur-sm">
+										<div className="flex items-center gap-3">
+											<Button
+												variant="ghost"
+												size="icon"
+												className="sm:hidden h-8 w-8"
+												onClick={() => {
+													setActiveConvo(null);
+													loadConversations(false); // refresh unread counts
+												}}
+											>
+												<ArrowLeft className="h-4 w-4" />
+											</Button>
+											<Avatar
+												className={`h-9 w-9 ${avatarColor(getOtherParticipant(activeConvo)?._id || "")}`}
+											>
+												<AvatarFallback className="text-xs font-bold">
+													{getInitials(
+														getOtherParticipant(activeConvo)?.fullName,
+													)}
+												</AvatarFallback>
+											</Avatar>
+											<div>
+												<div className="flex items-center gap-2">
+													<p className="text-sm font-semibold leading-tight truncate">
+														{getOtherParticipant(activeConvo)?.fullName ||
+															t.messages.unknown}
+													</p>
+													<RoleBadge
+														role={getOtherParticipant(activeConvo)?.role}
+													/>
+												</div>
+												<p className="text-[11px] text-muted-foreground leading-tight">
+													{getOtherParticipant(activeConvo)?.email}
+												</p>
+											</div>
+										</div>
+										{!activeConvo.isArchived && (
+											<div className="flex items-center gap-2">
+												{/* Schedule Meeting â€” investor only */}
+												{profile?.role === "investor" && (
+													<Button
+														variant="outline"
+														size="sm"
+														className="gap-1.5 text-xs"
+														onClick={() => setShowScheduleModal(true)}
+													>
+														<CalendarDays className="h-3.5 w-3.5" />
+														<span className="hidden sm:inline">
+															{t.messages.scheduleMeeting}
+														</span>
+													</Button>
+												)}
+												<Button
+													variant="ghost"
+													size="sm"
+													className="text-destructive hover:text-destructive hover:bg-destructive/10 gap-1.5"
+													onClick={() => setShowReportDialog(true)}
+												>
+													<ShieldAlert className="h-4 w-4" />
+													<span className="hidden sm:inline">{t.messages.report}</span>
+												</Button>
+											</div>
+										)}
+									</div>
+
+									{/* Messages */}
+									<div
+										ref={scrollContainerRef}
+										onScroll={handleScroll}
+										className="flex-1 overflow-y-auto px-3 sm:px-6 py-4"
+										style={{
+											backgroundImage:
+												"radial-gradient(circle at 1px 1px, hsl(var(--muted) / 0.3) 1px, transparent 0)",
+											backgroundSize: "24px 24px",
+										}}
+									>
+										{loadingMessages ? (
+											<div className="flex justify-center py-12">
+												<Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+											</div>
+								) : messages.length === 0 ? (
+											<div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+												<div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 mb-3">
+													<Send className="h-6 w-6 text-primary/60" />
+												</div>
+												<p className="text-sm font-medium">{t.messages.noMessages}</p>
+												<p className="text-xs text-muted-foreground/60 mt-1">
+													{t.messages.sayHello}
+												</p>
+											</div>
+										) : (
+											groupedMessages.map((group) => (
+												<div key={group.date}>
+													{/* Date separator */}
+													<div className="flex items-center justify-center my-4">
+														<span className="px-3 py-1 rounded-full bg-muted/60 text-[11px] font-medium text-muted-foreground shadow-sm">
+															{formatDateSeparator(group.date, t)}
+														</span>
+													</div>
+
+													{group.msgs.map((msg) => {
+														const senderId = getSenderId(msg);
+														const isMine = senderId === profile?._id;
+														const read = isReadByOther(msg);
+
+														return (
+															<div
+																key={msg._id}
+																className={`flex mb-1.5 ${isMine ? "justify-end" : "justify-start"}`}
+															>
+																<div
+																	className={`relative max-w-[80%] sm:max-w-[65%] rounded-2xl px-3.5 py-2 shadow-sm transition-all ${
+																		isMine
+																			? "bg-primary text-primary-foreground rounded-br-md"
+																			: "bg-card border border-border/50 rounded-bl-md"
+																	}`}
+																>
+																	{(() => {
+																		const meetingData = parseMeetingCard(
+																			msg.body,
+																		);
+																		return meetingData ? (
+																			<MeetingCard
+																				data={meetingData}
+																				onJoin={(id) =>
+																					router.push(
+																						`/${profile?.role}/meeting/${id}`,
+																					)
+																				}
+																			/>
+																		) : (
+																			<div>
+																				<p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
+																					{msg.body}
+																				</p>
+																				{translations[msg._id] && (
+																					<p
+																						className={`text-[12px] leading-relaxed whitespace-pre-wrap break-words mt-1.5 pt-1.5 border-t ${
+																							isMine
+																								? "border-primary-foreground/20 text-primary-foreground/80"
+																								: "border-border text-muted-foreground"
+																						} italic`}
+																					>
+																						ðŸŒ {translations[msg._id]}
+																					</p>
+																				)}
+																			</div>
+																		);
+																	})()}
+																	{msg.attachmentUrl && (
+																		<a
+																			href={msg.attachmentUrl}
+																			target="_blank"
+																			rel="noopener noreferrer"
+																			className="text-xs underline flex items-center gap-1 mt-1.5 opacity-80"
+																		>
+																			<Paperclip className="h-3 w-3" />{" "}
+																			{t.messages.attachment}
+																		</a>
+																	)}
+																	{/* Time + Translate + Read Receipt */}
+																	<div
+																		className={`flex items-center justify-end gap-1 mt-0.5 ${
+																			isMine
+																				? "text-primary-foreground/50"
+																				: "text-muted-foreground/60"
+																		}`}
+																	>
+																		<span className="text-[10px] leading-none">
+																			{formatTime(msg.createdAt)}
+																		</span>
+																		{!parseMeetingCard(msg.body) && (
+																			<button
+																				type="button"
+																				onClick={(e) => {
+																					e.stopPropagation();
+																					handleTranslate(msg._id, msg.body);
+																				}}
+																				disabled={translating[msg._id]}
+																				className={`inline-flex items-center justify-center h-4 w-4 rounded-sm transition-all hover:scale-110 ${
+																					translations[msg._id]
+																						? "opacity-80"
+																						: "opacity-40 hover:opacity-100"
+																				}`}
+																				title={
+																					translations[msg._id]
+																						? t.messages.hideTranslation
+																						: t.messages.translate
+																				}
+																			>
+																				{translating[msg._id] ? (
+																					<Loader2 className="h-2.5 w-2.5 animate-spin" />
+																				) : (
+																					<Languages className="h-2.5 w-2.5" />
+																				)}
+																			</button>
+																		)}
+																		{isMine && (
+																			<span className="flex items-center">
+																				{read ? (
+																					<CheckCheck className="h-3.5 w-3.5 text-sky-300" />
+																				) : (
+																					<Check className="h-3.5 w-3.5" />
+																				)}
+																			</span>
+																		)}
+																	</div>
+																</div>
+															</div>
+														);
+													})}
+												</div>
+											))
+										)}
+										<div ref={messagesEndRef} />
+									</div>
+
+									{/* Message Input */}
+									{activeConvo.isArchived ? (
+										<div className="p-4 border-t bg-destructive/5">
+											<div className="flex items-start gap-3">
+												<ShieldAlert className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+												<div>
+													<p className="text-sm font-semibold text-destructive">
+														{t.messages.conversationFrozen}
+													</p>
+													<p className="text-xs text-muted-foreground mt-1">
+														{t.messages.frozenDescription}
+													</p>
+												</div>
+											</div>
+										</div>
+									) : (
+										<div className="px-3 sm:px-4 py-3 border-t border-border bg-card/80 backdrop-blur-sm">
+											<div className="flex items-end gap-2">
+												<Input
+													ref={inputRef}
+													placeholder={t.messages.typeMessage}
+													value={messageBody}
+													onChange={(e) => setMessageBody(e.target.value)}
+													onKeyDown={(e) => {
+														if (e.key === "Enter" && !e.shiftKey) {
+															e.preventDefault();
+															handleSend();
+														}
+													}}
+													disabled={sending}
+													className="flex-1 rounded-full border-border bg-muted/30 px-4 h-10 focus-visible:ring-primary/30"
+												/>
+												<Button
+													onClick={handleSend}
+													disabled={!messageBody.trim() || sending}
+													size="icon"
+													className="h-10 w-10 rounded-full shrink-0 shadow-sm"
+												>
+													{sending ? (
+														<Loader2 className="h-4 w-4 animate-spin" />
+													) : (
+														<Send className="h-4 w-4" />
+													)}
+												</Button>
+											</div>
+										</div>
+									)}
+								</>
+							)}
+						</div>
+					</div>
+				</div>
+
+				{/* â”€â”€ Schedule Meeting Modal â”€â”€ */}
+				{showScheduleModal && activeConvo && (
+					<ScheduleMeetingModal
+						submissionId={
+							typeof activeConvo.submissionId === "object" &&
+							activeConvo.submissionId !== null
+								? (activeConvo.submissionId as { _id: string })._id
+								: ((activeConvo.submissionId as string | null) ?? "")
+						}
+						submissionTitle={
+							typeof activeConvo.submissionId === "object" &&
+							activeConvo.submissionId !== null
+								? (activeConvo.submissionId as { _id: string; title: string })
+										.title
+								: t.pitch.thisPitch
+						}
+						entrepreneurUserId={
+							activeConvo.participants.find((p) => p._id !== profile?._id)
+								?._id ?? ""
+						}
+						onClose={() => setShowScheduleModal(false)}
+						onScheduled={async (meeting: ScheduledMeeting) => {
+							// Send meeting card as a message in the conversation
+							if (!user || !activeConvo) return;
+							try {
+								const token = await user.getIdToken();
+								await fetch(
+									`${api}/messages/conversations/${activeConvo._id}/messages`,
+									{
+										method: "POST",
+										headers: {
+											Authorization: `Bearer ${token}`,
+											"Content-Type": "application/json",
+										},
+										body: JSON.stringify({
+											body: `${MEETING_PREFIX}${JSON.stringify(meeting)}`,
+											type: "text",
+										}),
+									},
+								);
+								loadMessages(activeConvo._id);
+							} catch {
+								showErrorToast(t.messages.failedToShareMeeting);
+							}
+							setShowScheduleModal(false);
+						}}
+					/>
+				)}
+
+				{/* â”€â”€ Report Misconduct Dialog â”€â”€ */}
+				<Dialog open={showReportDialog} onOpenChange={setShowReportDialog}>
+					<DialogContent className="sm:max-w-md">
+						<DialogHeader>
+							<DialogTitle className="flex items-center gap-2">
+								<ShieldAlert className="h-5 w-5 text-destructive" />
+								{t.messages.reportMisconduct}
+							</DialogTitle>
+							<DialogDescription>
+								{t.messages.reportMisconductDesc}
+							</DialogDescription>
+						</DialogHeader>
+						<div className="space-y-4 py-2">
+							<div className="space-y-2">
+								<Label htmlFor="report-reason">{t.messages.reasonLabel}</Label>
+								<Input
+									id="report-reason"
+									placeholder={t.messages.reasonPlaceholder}
+									value={reportReason}
+									onChange={(e) => setReportReason(e.target.value)}
+								/>
+							</div>
+							<div className="space-y-2">
+								<Label htmlFor="report-details">{t.messages.additionalDetails}</Label>
+								<Textarea
+									id="report-details"
+									placeholder={t.messages.additionalDetailsPlaceholder}
+									value={reportDetails}
+									onChange={(e) => setReportDetails(e.target.value)}
+									rows={4}
+								/>
+							</div>
+						</div>
+						<DialogFooter>
+							<Button
+								variant="outline"
+								onClick={() => setShowReportDialog(false)}
+							>
+								{t.common.cancel}
+							</Button>
+							<Button
+								variant="destructive"
+								onClick={handleReport}
+								disabled={!reportReason.trim() || reportLoading}
+							>
+								{reportLoading ? (
+									<Loader2 className="h-4 w-4 animate-spin mr-2" />
+								) : null}
+								{t.messages.submitReport}
+							</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
+			</DashboardLayout>
+		</ProtectedRoute>
+	);
+}
+
+export default function EntrepreneurMessages() {
+	return (
+		<Suspense fallback={null}>
+			<MessagesContent />
+		</Suspense>
+	);
+}
