@@ -1,0 +1,431 @@
+import type { Request, Response } from "express";
+import { Conversation } from "../models/Conversation";
+import { MisconductReport } from "../models/MisconductReport";
+import { MessageService } from "../services/message.service";
+import { NotificationService } from "../services/notification.service";
+import { translateText } from "../services/translation.service";
+
+const handleMessageError = (
+	res: Response,
+	error: unknown,
+	fallback: string,
+) => {
+	if (MessageService.isServiceError(error)) {
+		res
+			.status(error.statusCode)
+			.json({ status: "error", message: error.message });
+		return;
+	}
+
+	console.error(fallback, error);
+	res.status(500).json({ status: "error", message: fallback });
+};
+
+export class MessageController {
+	static async getOrCreateConversation(
+		req: Request,
+		res: Response,
+	): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const conversation = await MessageService.getOrCreateConversation({
+				currentUserId: req.user._id.toString(),
+				otherUserId: req.body.otherUserId,
+				matchResultId: req.body.matchResultId,
+				submissionId: req.body.submissionId,
+			});
+
+			res.status(200).json({ status: "success", conversation });
+		} catch (error) {
+			handleMessageError(res, error, "Failed to create conversation");
+		}
+	}
+
+	static async getConversation(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const conversationId = req.params.conversationId;
+			const conversation = await MessageService.getConversationById(
+				conversationId,
+				req.user._id.toString(),
+			);
+
+			if (!conversation) {
+				res.status(404).json({
+					status: "error",
+					message: "Conversation not found",
+				});
+				return;
+			}
+
+			res.status(200).json({
+				status: "success",
+				conversation,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to get conversation");
+		}
+	}
+
+	static async listConversations(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const conversations = await MessageService.listConversationsForUser(
+				req.user._id.toString(),
+			);
+
+			res.status(200).json({
+				status: "success",
+				count: conversations.length,
+				conversations,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to list conversations");
+		}
+	}
+
+	static async listMessages(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const result = await MessageService.listMessages({
+				conversationId: req.params.conversationId,
+				userId: req.user._id.toString(),
+				page: req.query.page as string | undefined,
+				limit: req.query.limit as string | undefined,
+			});
+
+			res.status(200).json({
+				status: "success",
+				count: result.messages.length,
+				total: result.total,
+				page: result.page,
+				totalPages: result.totalPages,
+				messages: result.messages,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to list messages");
+		}
+	}
+
+	static async sendMessage(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const message = await MessageService.sendMessage({
+				conversationId: req.params.conversationId,
+				senderId: req.user._id.toString(),
+				body: req.body.body,
+				type: req.body.type,
+				attachmentUrl: req.body.attachmentUrl,
+			});
+
+			res
+				.status(201)
+				.json({ status: "success", message: "Message sent", data: message });
+		} catch (error) {
+			handleMessageError(res, error, "Failed to send message");
+		}
+	}
+
+	static async addParticipant(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+			const conversation = await MessageService.addParticipant(
+				req.params.conversationId,
+				req.user._id.toString(),
+				req.body.targetUserId,
+			);
+			res.status(200).json({
+				status: "success",
+				message: "Participant added",
+				data: conversation,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to add participant");
+		}
+	}
+
+	static async removeParticipant(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+			const conversation = await MessageService.removeParticipant(
+				req.params.conversationId,
+				req.user._id.toString(),
+				req.params.userId,
+			);
+			res.status(200).json({
+				status: "success",
+				message: "Participant removed",
+				data: conversation,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to remove participant");
+		}
+	}
+
+	static async markConversationRead(
+		req: Request,
+		res: Response,
+	): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			await MessageService.markConversationRead({
+				conversationId: req.params.conversationId,
+				userId: req.user._id.toString(),
+			});
+
+			res
+				.status(200)
+				.json({ status: "success", message: "Conversation marked as read" });
+		} catch (error) {
+			handleMessageError(res, error, "Failed to mark conversation read");
+		}
+	}
+
+	static async reportMisconduct(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const result = await MessageService.reportMisconduct({
+				conversationId: req.params.conversationId,
+				reporterId: req.user._id.toString(),
+				reason: req.body.reason,
+				details: req.body.details,
+			});
+
+			res.status(201).json({
+				status: "success",
+				message: "Conversation frozen and admin alerted",
+				...result,
+			});
+		} catch (error) {
+			handleMessageError(res, error, "Failed to report misconduct");
+		}
+	}
+
+	static async getUnreadCount(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const count = await MessageService.getUnreadCountForUser(
+				req.user._id.toString(),
+			);
+
+			res.status(200).json({ status: "success", unreadCount: count });
+		} catch (error) {
+			handleMessageError(res, error, "Failed to get unread count");
+		}
+	}
+
+	static async listNotifications(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const notifications = await NotificationService.getUserNotifications(
+				req.user._id.toString(),
+			);
+
+			res.status(200).json({
+				status: "success",
+				count: notifications.length,
+				notifications,
+			});
+		} catch (error) {
+			console.error("Failed to fetch notifications", error);
+			res
+				.status(500)
+				.json({ status: "error", message: "Failed to fetch notifications" });
+		}
+	}
+
+	static async markNotificationRead(
+		req: Request,
+		res: Response,
+	): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const notification = await NotificationService.markAsRead(
+				req.params.notificationId,
+				req.user._id.toString(),
+			);
+
+			if (!notification) {
+				res
+					.status(404)
+					.json({ status: "error", message: "Notification not found" });
+				return;
+			}
+
+			res.status(200).json({ status: "success", notification });
+		} catch (error) {
+			console.error("Failed to mark notification read", error);
+			res
+				.status(500)
+				.json({ status: "error", message: "Failed to update notification" });
+		}
+	}
+
+	static async markAllNotificationsRead(
+		req: Request,
+		res: Response,
+	): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			await NotificationService.markAllAsRead(req.user._id.toString());
+
+			res.status(200).json({
+				status: "success",
+				message: "All notifications marked as read",
+			});
+		} catch (error) {
+			console.error("Failed to mark all notifications read", error);
+			res
+				.status(500)
+				.json({ status: "error", message: "Failed to update notifications" });
+		}
+	}
+
+	/* ── Admin: Misconduct Reports ── */
+
+	static async listReports(req: Request, res: Response): Promise<void> {
+		try {
+			const { status: statusFilter } = req.query;
+			const filter: Record<string, unknown> = {};
+			if (statusFilter && statusFilter !== "all") filter.status = statusFilter;
+
+			const reports = await MisconductReport.find(filter)
+				.populate("reporterId", "fullName email role")
+				.populate("reportedUserIds", "fullName email role")
+				.populate("conversationId")
+				.sort({ createdAt: -1 })
+				.limit(100);
+
+			res
+				.status(200)
+				.json({ status: "success", count: reports.length, reports });
+		} catch (error) {
+			console.error("Failed to fetch reports", error);
+			res
+				.status(500)
+				.json({ status: "error", message: "Failed to fetch reports" });
+		}
+	}
+
+	static async resolveReport(req: Request, res: Response): Promise<void> {
+		try {
+			const { action } = req.body; // "unfreeze" | "keep_frozen"
+			const report = await MisconductReport.findById(req.params.reportId);
+			if (!report) {
+				res.status(404).json({ status: "error", message: "Report not found" });
+				return;
+			}
+
+			report.status = "resolved";
+			await report.save();
+
+			// If admin chooses to unfreeze, restore the conversation
+			if (action === "unfreeze") {
+				await Conversation.findByIdAndUpdate(report.conversationId, {
+					isArchived: false,
+				});
+			}
+
+			res.status(200).json({
+				status: "success",
+				message:
+					action === "unfreeze"
+						? "Report resolved — conversation has been unfrozen"
+						: "Report resolved — conversation remains frozen",
+				report,
+			});
+		} catch (error) {
+			console.error("Failed to resolve report", error);
+			res
+				.status(500)
+				.json({ status: "error", message: "Failed to resolve report" });
+		}
+	}
+
+	/* ── Real-Time Translation ── */
+
+	static async translateMessage(req: Request, res: Response): Promise<void> {
+		try {
+			if (!req.user) {
+				res.status(401).json({ status: "error", message: "Unauthorized" });
+				return;
+			}
+
+			const { text, targetLang } = req.body;
+			if (!text || !targetLang) {
+				res.status(400).json({
+					status: "error",
+					message: "text and targetLang are required",
+				});
+				return;
+			}
+
+			const { translated, detectedSourceLang } = await translateText(
+				text,
+				targetLang,
+			);
+
+			res.status(200).json({
+				status: "success",
+				translated,
+				detectedSourceLang,
+				targetLang,
+			});
+		} catch (error) {
+			console.error("Translation error:", error);
+			const message =
+				error instanceof Error ? error.message : "Translation failed";
+			res.status(500).json({ status: "error", message });
+		}
+	}
+}
